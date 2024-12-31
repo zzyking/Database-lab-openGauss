@@ -46,9 +46,9 @@
 
 > 成员分工：
 >
-> - 臧泽元：环境搭建、任务1、任务4
-> - 蔡景旭：任务3
-> - 庄卜荣：任务2
+> - 臧泽元：环境搭建、任务1、任务4、任务5
+> - 蔡景旭：任务3、任务7
+> - 庄卜荣：任务2、任务6
 
 ## 0 环境搭建
 
@@ -2517,3 +2517,2930 @@ nationkey name regionkey comment
 ```
 
 表明已不存在编号为 25 的项目，删除成功。
+
+
+
+## 5 数据库物理设计
+
+### 5.1 表空间
+
+通过使用表空间，管理员可以控制一个数据库安装的磁盘布局。这样有以下特点：
+
+1. 如果初始化数据库所在的分区或者卷空间已满，又不能逻辑上扩展更多空间，可以在不同的分区上创建和使用表空间，直到系统重新配置空间。
+2. 表空间允许管理员根据数据库对象的使用模式安排数据位置，从而提高性能。
+3. 一个频繁使用的索引可以放在性能稳定且运算速度较快的磁盘上，比如一种固态设备。
+4. 一个存储归档的数据，很少使用的或者对性能要求不高的表可以存储在一个运算速度较慢的磁盘上。
+5. 管理员通过表空间可以设置占用的磁盘空间。用以在和其他数据共用分区的时候，防止表空间占用相同分区上的其他空间。
+6. 表空间可以控制数据库数据占用的磁盘空间，当表空间所在磁盘的使用率达到 90% 时，数据库将被设置为只读模式，当磁盘使用率降到 90% 以下时，数据库将恢复到读写模式。
+7. 建议用户使用数据库时，通过后台监控程序或者 Database Manager 进行磁盘空间使用率监控，以免出现数据库只读情况。
+8. 表空间对应于一个文件系统目录，比如：`数据库节点数据目录/pg_location/tablespace/tablespace_1` 是用户拥有读写权限的空目录。
+9. 使用表空间配额管理会使性能有 30% 左右的影响，MAXSIZE 指定每个数据库节点的配额大小，误差范围在 500MB 以内。请根据实际的情况确认是否需要设置表空间的最大值。
+
+#### 5.1.1 创建表空间
+
+创建用户 jack:
+
+```shell
+omm=# CREATE USER jack IDENTIFIED BY 'openeuler12345!';
+NOTICE:  The encrypted password contains MD5 ciphertext, which is not secure.
+CREATE ROLE
+```
+
+创建表空间：
+
+```shell
+omm=# CREATE TABLESPACE fastspace RELATIVE LOCATION 'tablespace/tablespace_1';
+CREATE TABLESPACE
+```
+
+其中 “fastspace” 为新创建的表空间，`/var/lib/opengauss/data/pg_location/tablespace/tablespace_1` 是用户拥有读写权限的空目录。
+
+数据库系统管理员（本例中，为 omm 用户）执行如下命令将“fastspace”表空间的访问权限赋予数据用户 jack：
+
+```shell
+omm=# GRANT CREATE ON TABLESPACE fastspace TO jack;
+GRANT
+```
+
+以此类推，创建多个表空间：
+
+```shell
+omm=# CREATE TABLESPACE example2 RELATIVE LOCATION 'tablespace/tablespace_2';
+CREATE TABLESPACE
+omm=# CREATE TABLESPACE example3 RELATIVE LOCATION 'tablespace/tablespace_3';
+CREATE TABLESPACE
+omm=# CREATE TABLESPACE example4 RELATIVE LOCATION 'tablespace/tablespace_4';
+CREATE TABLESPACE
+```
+
+#### 5.1.2 在表空间上创建对象
+
+如果用户拥有表空间的 CREATE 权限，就可以在表空间上创建数据库对象。操作系统管理员（omm 用户）具 有以上表空间的 CREATE 权限，并且 jack 用户拥有 fastspace 表空间的 CREATE 权限。 在指定的表空间上创建表 (创建其他的对象方法类似)：
+
+```shell
+omm=# CREATE TABLE table_1(i int) TABLESPACE fastspace;
+CREATE TABLE
+omm=# CREATE TABLE table_2(i int) TABLESPACE example2;
+CREATE TABLE
+```
+
+**在默认表空间上创建表：**
+
+首先设置默认表空间：
+
+```shell
+omm=# SET default_tablespace = 'example3';
+SET
+```
+
+再创建表，这样无需指定表空间，表创建在默认表空间：
+
+```shell
+omm=# CREATE TABLE table_3(i int);
+CREATE TABLE
+```
+
+#### 5.1.3 管理表空间
+
+##### 5.1.3.1 查询表空间
+
+方式 1：检查 pg_tablespace 系统表。如下命令可查到系统和用户定义的全部表空间。
+
+```postgresql
+SELECT spcname FROM pg_tablespace;
+```
+
+```shell
+omm=# SELECT spcname FROM pg_tablespace;
+  spcname   
+------------
+ pg_default
+ pg_global
+ fastspace
+ example2
+ example3
+ example4
+(6 rows)
+```
+
+方式2：使用 gsql 程序的元命令查询表空间：
+
+```shell
+omm=# \db
+             List of tablespaces
+    Name    | Owner |        Location         
+------------+-------+-------------------------
+ example2   | omm   | tablespace/tablespace_2
+ example3   | omm   | tablespace/tablespace_3
+ example4   | omm   | tablespace/tablespace_4
+ fastspace  | omm   | tablespace/tablespace_1
+ pg_default | omm   | 
+ pg_global  | omm   | 
+(6 rows)
+```
+
+##### 5.1.3.2 查询表空间当前使用情况
+
+```shell
+omm=# SELECT PG_TABLESPACE_SIZE('fastspace');
+ pg_tablespace_size 
+--------------------
+               8192
+(1 row)
+```
+
+其中 8192 表示表空间的大小，单位为字节。
+
+##### 5.1.3.3 重命名表空间
+
+执行如下命令对表空间 fastspace 重命名为 example：
+
+```shell
+omm=# ALTER TABLESPACE fastspace RENAME TO example;
+ALTER TABLESPACE
+omm=# \db
+             List of tablespaces
+    Name    | Owner |        Location         
+------------+-------+-------------------------
+ example    | omm   | tablespace/tablespace_1
+ example2   | omm   | tablespace/tablespace_2
+ example3   | omm   | tablespace/tablespace_3
+ example4   | omm   | tablespace/tablespace_4
+ pg_default | omm   | 
+ pg_global  | omm   | 
+(6 rows)
+```
+
+##### 5.1.3.4 删除表空间
+
+用户必须是表空间的 owner 或者系统管理员才能删除表空间。
+
+```shell
+omm=# DROP TABLESPACE example;
+ERROR:  tablespace "example" is not empty
+```
+
+删除失败，表空间不为空的情况下无法删除表空间 (避免误删里面的重要数据)。
+
+先清空表空间：
+
+```shell
+omm=# DROP TABLE table_1;
+DROP TABLE
+```
+
+然后再删除表空间：
+
+```shell
+omm=# DROP TABLESPACE example;
+DROP TABLESPACE
+```
+
+删除成功：
+
+```shell
+omm=# \db
+             List of tablespaces
+    Name    | Owner |        Location         
+------------+-------+-------------------------
+ example2   | omm   | tablespace/tablespace_2
+ example3   | omm   | tablespace/tablespace_3
+ example4   | omm   | tablespace/tablespace_4
+ pg_default | omm   | 
+ pg_global  | omm   | 
+(5 rows)
+```
+
+### 5.2 分区表
+
+分区表和普通表相比具有以下优点：
+
+- 改善查询性能：对分区对象的查询可以仅搜索自己关心的分区，提高检索效率。
+- 增强可用性：如果分区表的某个分区出现故障，表在其他分区的数据仍然可用。
+- 方便维护：如果分区表的某个分区出现故障，需要修复数据，只修复该分区即可。
+- 均衡 I/O：可以把不同的分区映射到不同的磁盘以平衡 I/O，改善整个系统性能。
+- 普通表若要转成分区表，需要新建分区表，然后把普通表中的数据导入到新建的分区表中。因此在初始设计表时，请根据业务提前规划是否使用分区表。
+
+openGauss分区表限制和特点：
+
+1. 主键约束或唯一约束必须要包含分区字段
+2. 分区表表名只能在 `pg_partition` 视图中查看，在 `pg_tables` 和 `pg_stat_all_tables` 中无法查到
+3. 分区表索引在 opengauss 里分 local 和 global，默认是 global
+4. 分区个数不能超过 327675
+5. 选择分区使用 `PARTITION FOR()`，括号里指定值个数应该与定义分区时使用的列个数相同，并且一一对应。
+6. Value 分区表不支持相应的 `Alter Partition` 操作
+7. 列存分区表不支持切割分区
+8. 间隔分区表不支持添加分区
+
+#### 5.2.1 创建分区表
+
+##### 5.2.1.1 方法一：`VALUES LESS THAN`
+
+语法：`PARTITION BY RANGE(partition_key)` 从句是 `VALUES LESS THAN` 的语法格式，范围分区策略的分区键最多支持 4 列。
+
+```postgresql
+PARTITION partition_name VALUES LESS THAN ( { partition_value | MAXVALUE } )
+```
+
+- 每个分区都需要指定一个上边界。
+- 分区上边界的类型应当和分区键的类型一致。
+- 分区列表是按照分区上边界升序排列的，值较小的分区位于值较大的分区之前。
+
+实例：`task1.sql`
+
+```postgresql
+create table partition_orders_1(
+o_orderkey integer,
+o_custkey integer,
+o_orderstatus char(1),
+o_totalprice decimal(15,2),
+o_orderdate date,
+o_orderpriority char(15),
+o_clerk char(15),
+o_shippriority integer,
+o_comment varchar(79),
+PRIMARY KEY (o_orderkey)
+)
+partition by range(o_orderkey)
+(
+partition p1 values less than(100),
+partition p2 values less than(200),
+partition p3 values less than(300),
+partition p4 values less than(maxvalue)
+);
+```
+
+此分区表分区键为 id，分了 4 个区，分别是 p1<100, 100<=p2<200, 200<=p3<300, 300<=p4。
+
+文件保存在 `/home/omm` 下，执行 `gsql -f task1.sql`：
+
+```shell
+[omm@cfde74516988 ~]$ gsql -f task1.sql
+gsql:task1.sql:19: NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "partition_orders_1_pkey" for table "partition_orders_1"
+CREATE TABLE
+total time: 24  ms
+```
+
+数据库中执行 `\d+` 命令显示该分区表的详细信息：
+
+![image-20241222183029666](assets/image-20241222183029666.png)
+
+**表基本信息**
+
+- **Table**: 表名是 public.partition_orders_1，属于 public 模式。
+
+**索引**
+
+- 索引定义部分：
+  - **PRIMARY KEY**: 主键是 o_orderkey，使用的是 B-tree 索引。
+  - **LOCAL 索引**:
+    - 每个分区都有独立的索引：
+      - p1_o_orderkey_idx 对应分区 p1。
+      - p2_o_orderkey_idx 对应分区 p2。
+      - p3_o_orderkey_idx 对应分区 p3。
+      - p4_o_orderkey_idx 对应分区 p4。
+  - 索引的表空间是 pg_default（数据库默认表空间）。
+
+**分区定义**
+
+- **Range partition by(o_orderkey)**:
+  - 表按照 o_orderkey 进行范围分区。
+  - 范围分区将数据根据范围划分到不同的子表中。
+
+- **Number of partition: 4**: 表明分区表有 4 个分区。
+  - 可以通过 pg_partition 表查看每个分区的范围和元数据。
+
+**其他信息**
+
+- **Has OIDs**: 表中没有启用 OIDs（对象标识符）。
+- **Options**:
+  - **orientation=row**: 表以行存储（Row-Oriented）。
+  - **compression=no**: 表未启用压缩。
+
+通过 select 命令列出各分区情况：
+
+```shell
+omm=# select relname,parttype,parentid,boundaries from pg_partition where parentid in(select oid from pg_class where relname='partition_orders_1');
+      relname       | parttype | parentid | boundaries 
+--------------------+----------+----------+------------
+ partition_orders_1 | r        |    16728 | 
+ p1                 | p        |    16728 | {100}
+ p2                 | p        |    16728 | {200}
+ p3                 | p        |    16728 | {300}
+ p4                 | p        |    16728 | {NULL}
+(5 rows)
+```
+
+其中 parttype 为 r (Root) 表示根分区，即分区表本身（对应主表）；为 p (Partition) 表示子分区或具体的分区表。
+
+##### 5.2.1.2 方法二：`START END`
+
+语法：`PARTITION BY RANGE(partition_key)` 从句是 `START END` 的语法格式，范围分区策略的分区键仅支持 1 列。
+
+```postgresql
+PARTITION partition_name {START(partition_value) END(partition_value) EVERY(interval_value)} | {START(partition_value) END(partition_value | MAXVALUE)} | {START(partition_value)} | {END(partition_value | MAXVALUE)}
+```
+
+- 在创建分区表若第一个分区定义含 START 值，则范围（MINVALUE，START）将自动作为实际的第一个分 区。
+- 每个 partition_start_end_item 中的 START 值（如果有的话，下同）必须小于其 END 值；
+- 相邻的两个 partition_start_end_item，第一个的 END 值必须等于第二个的 START 值； 
+- 每个 partition_start_end_item 中的 EVERY 值必须是正向递增的，且必须小于（END-START）值；
+- 每个分区包含起始值，不包含终点值，即形如：[起始值，终点值)，起始值是 MINVALUE 时则不包含；
+- 一个 partition_start_end_item 创建的每个分区所属的 TABLESPACE 一样；
+- partition_name 作为分区名称前缀时，其长度不要超过 57 字节，超过时自动截断；
+- 在创建、修改分区表时请注意分区表的分区总数不可超过最大限制（32767）；
+- 在创建分区表时 START END 与 LESS THAN 语法不可混合使用。
+- 即使创建分区表时使用 START END 语法，备份（gs_dump）出的 SQL 语句也是 VALUES LESS THAN · 单一 start 分区不能紧挨着单一 end 分区，否则会报错
+
+实例：`task2.sql`
+
+```postgresql
+create table partition_orders_2(
+o_orderkey integer,
+o_custkey integer,
+o_orderstatus char(1),
+o_totalprice decimal(15,2),
+o_orderdate date,
+o_orderpriority char(15),
+o_clerk char(15),
+o_shippriority integer,
+o_comment varchar(79),
+PRIMARY KEY (o_orderkey)
+)
+partition by range(o_orderkey)
+(
+partition p1 start(2) end(100) every(10),
+partition p2 end(200),
+partition p3 end(300),
+partition p4 start(300),
+partition p5 start(400),
+partition p6 start(500) end(600)
+);
+```
+
+此实例第一个分区定义含 start，则范围（minvalue，2）自动作为第一个分区 p1_0，p1_0<2
+
+由于 every（10），则 p1 分区进行间隔分区，间隔为 10
+
+即 p1_1 [2,12)，p1_2 [12,22)，p1_3 [22,32)，p1_ [32,42)，p1_5 [42,52)，p1_6 [52,62)，p1_7 [62,72)，p1_8 [72,82)，p1_9 [82,92)，p1_10 [92,100)
+
+之后 5 个分区，p2 [100,200)，p3 [200,300)，p4 [300,400)，p5 [400,500)，p6 [500,600)
+
+文件保存在 `/home/omm` 下，执行 `gsql -f task2.sql`：
+
+```shell
+gsql:task2.sql:21: NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "partition_orders_2_pkey" for table "partition_orders_2"
+CREATE TABLE
+total time: 24  ms
+```
+
+数据库中执行 `\d+` 命令显示该分区表的详细信息：
+
+![image-20241222213022580](assets/image-20241222213022580.png)
+
+**表基本信息**
+
+- **Table**: 表名是 public.partition_orders_2，属于 public 模式。
+
+**索引**
+
+- 索引定义部分：
+  - **PRIMARY KEY**: 主键是 o_orderkey，使用的是 B-tree 索引。
+  - **LOCAL 索引**:
+    - 每个分区都有独立的索引，每个索引的名称以分区名称为前缀：
+      - p1_0_o_orderkey_idx 到 p1_10_o_orderkey_idx：这些索引对应分区 p1 的子分区。
+      - p2_o_orderkey_idx：对应分区 p2。
+      - p3_o_orderkey_idx 到 p6_o_orderkey_idx：对应分区 p3 到 p6。
+    - 每个分区及其子分区都有各自的局部索引（LOCAL），便于查询优化。
+  - 索引的表空间是 pg_default（数据库默认表空间）。
+
+**分区定义**
+
+- **Range partition by(o_orderkey)**:
+  - 表按照 o_orderkey 进行范围分区。
+  - 范围分区将数据根据范围划分到不同的子表中。
+
+- **Number of partition: 16**: 表明分区表有 16 个分区。
+  - 可以通过 pg_partition 表查看每个分区的范围和元数据。
+
+**其他信息**
+
+- **Has OIDs**: 表中没有启用 OIDs（对象标识符）。
+- **Options**:
+  - **orientation=row**: 表以行存储（Row-Oriented）。
+  - **compression=no**: 表未启用压缩。
+
+通过 select 命令列出各分区情况：
+
+```shell
+omm=# SELECT relname, parttype, boundaries 
+FROM pg_partition 
+WHERE parentid = (SELECT oid FROM pg_class WHERE relname = 'partition_orders_2');omm-# omm-# 
+      relname       | parttype | boundaries 
+--------------------+----------+------------
+ partition_orders_2 | r        | 
+ p1_0               | p        | {2}
+ p1_1               | p        | {12}
+ p1_2               | p        | {22}
+ p1_3               | p        | {32}
+ p1_4               | p        | {42}
+ p1_5               | p        | {52}
+ p1_6               | p        | {62}
+ p1_7               | p        | {72}
+ p1_8               | p        | {82}
+ p1_9               | p        | {92}
+ p1_10              | p        | {100}
+ p2                 | p        | {200}
+ p3                 | p        | {300}
+ p4                 | p        | {400}
+ p5                 | p        | {500}
+ p6                 | p        | {600}
+(17 rows)
+```
+
+##### 5.2.1.3 方法三：`INTERVAL`
+
+语法：从句指定了 `INTERVAL` 子句的语法格式，范围分区策略的分区键仅支持 1 列。
+
+```postgresql
+INTERVAL ('interval_expr') [ STORE IN (tablespace_name [, ... ] ) ]
+```
+
+
+
+- 列存表不支持间隔分区
+- interval_expr：自动创建分区的间隔，例如：1 day、1 month。
+- STORE IN (tablespace_name [, ... ] )：指定存放自动创建分区的表空间列表，如果有指定，则自动创建的分区 从表空间列表中循环选择使用，否则使用分区表默认的表空间。
+
+实例：`task3.sql`
+
+```postgresql
+create table partition_orders_3(
+o_orderkey integer,
+o_custkey integer,
+o_orderstatus char(1),
+o_totalprice decimal(15,2),
+o_orderdate date,
+o_orderpriority char(15),
+o_clerk char(15),
+o_shippriority integer,
+o_comment varchar(79),
+PRIMARY KEY (o_orderkey)
+)
+partition by range(o_orderdate)
+interval('1 day')
+(
+partition p1 values less than('2021-03-08 00:00:00'),
+partition p2 values less than('2021-03-09 00:00:00')
+);
+```
+
+直接执行此段代码 ，出现如下报错：
+
+```shell
+[omm@cfde74516988 ~]$ gsql -f task3.sql
+gsql:task3.sql:18: ERROR:  Invalid PRIMARY KEY/UNIQUE constraint for partitioned table
+DETAIL:  Columns of PRIMARY KEY/UNIQUE constraint Must contain PARTITION KEY
+total time: 0  ms
+```
+
+错误原因为分区键非主键，原因为组成约束的单个索引只能直接在它们自己的分区内强制执行唯一性，因此分区结构本身必须保证在不同分区中不存在重复项（分区表唯一约束），解决方法为设置联合主键：
+
+```postgresql
+create table partition_orders_3(
+o_orderkey integer,
+o_custkey integer,
+o_orderstatus char(1),
+o_totalprice decimal(15,2),
+o_orderdate date,
+o_orderpriority char(15),
+o_clerk char(15),
+o_shippriority integer,
+o_comment varchar(79),
+PRIMARY KEY (o_orderkey, o_orderdate)
+)
+partition by range(o_orderdate)
+interval('1 day')
+(
+partition p1 values less than('2021-03-08 00:00:00'),
+partition p2 values less than('2021-03-09 00:00:00')
+);
+```
+
+执行结果：
+
+```shell
+[omm@cfde74516988 ~]$ gsql -f task3.sql
+gsql:task3.sql:18: NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "partition_orders_3_pkey" for table "partition_orders_3"
+CREATE TABLE
+total time: 8  ms
+```
+
+![image-20241222221846858](assets/image-20241222221846858.png)
+
+此分区表，一开始创建的分区只有 p1,p2。但如果向表中插入键值不在已有分区范围内的元组，比如（1， '2021-03-11 00:00:00'），则会自动创建一个分区，其上界与插入的元组间隔 1 day，该元组存入该分区。
+
+插入元组（1，'2021-03-11 00:00:00'），再次通过 select 命令列出各分区情况（由于版本变化，插入语句略有不同）：
+
+```shell
+omm=# insert into partition_orders_3 (o_orderkey, o_orderdate) values (1, '2021-03-11 00:00:00');
+INSERT 0 1
+```
+
+![image-20241222222940188](assets/image-20241222222940188.png)
+
+可见，自动生成了 1 个新的分区，上界为‘2021-03-12 00:00:00’，与插入元组间隔为 1 day。
+
+##### 5.2.1.4 设置分区所在的表空间
+
+在创建分区表时，可以把分区表的不同分区设置在不同的表空间，从而提升整个系统的性能 通过在 partition 语句后面加上 tablespace 来指定创建的分区所在的表空间。
+
+实例：`task4.sql`
+
+```postgresql
+create table partition_orders_4(
+o_orderkey integer,
+o_custkey integer,
+o_orderstatus char(1),
+o_totalprice decimal(15,2),
+o_orderdate date,
+o_orderpriority char(15),
+o_clerk char(15),
+o_shippriority integer,
+o_comment varchar(79),
+PRIMARY KEY (o_orderkey)
+)
+tablespace example2
+partition by range(o_orderkey)
+(
+partition p1 values less than(100),
+partition p2 values less than(200) tablespace example4,
+partition p3 values less than(300),
+partition p4 values less than(maxvalue)
+);
+```
+
+创建成功：
+
+```shell
+[omm@cfde74516988 ~]$ gsql -f task4.sql
+gsql:task4.sql:20: NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "partition_orders_4_pkey" for table "partition_orders_4"
+CREATE TABLE
+total time: 8  ms
+```
+
+此分区表，分区 p1，p3，p4 都在表空间 example2 中，而分区 p2 在表空间 example4 中。
+
+#### 5.2.2 管理分区表
+
+##### 5.2.2.1 删除、添加、重命名分区
+
+删除分区 p4
+
+```shell
+omm=# ALTER TABLE partition_orders_4 DROP PARTITION p4;
+ALTER TABLE
+```
+
+添加分区 p_4
+
+```shell
+omm=# ALTER TABLE partition_orders_4 ADD PARTITION p_4 VALUES LESS THAN(MAXVALUE);
+ALTER TABLE
+```
+
+重命名分区 p3
+
+```shell
+omm=# ALTER TABLE partition_orders_4 RENAME PARTITION p3 TO p_3;
+ALTER TABLE
+```
+
+修改后分区显示如下：
+
+```shell
+omm=# select relname,parttype,parentid,boundaries from pg_partition where parentid in(select oid from pg_class where relname='partition_orders_4');
+      relname       | parttype | parentid | boundaries 
+--------------------+----------+----------+------------
+ partition_orders_4 | r        |    16793 | 
+ p1                 | p        |    16793 | {100}
+ p2                 | p        |    16793 | {200}
+ p_4                | p        |    16793 | {NULL}
+ p_3                | p        |    16793 | {300}
+(5 rows)
+```
+
+##### 5.2.2.2 修改分区的表空间
+
+将分区 p1 由原来所在的表空间 example2 移动到 example4：
+
+```shell
+omm=# ALTER TABLE partition_orders_4 MOVE PARTITION p1 TABLESPACE example4;
+ALTER TABLE
+omm=# select relname,parttype,parentid,boundaries from pg_partition where parentid in(select oid from pg_class where relname='partition_orders_4');
+      relname       | parttype | parentid | boundaries 
+--------------------+----------+----------+------------
+ partition_orders_4 | r        |    16793 | 
+ p2                 | p        |    16793 | {200}
+ p_4                | p        |    16793 | {NULL}
+ p_3                | p        |    16793 | {300}
+ p1                 | p        |    16793 | {100}
+(5 rows)
+```
+
+为显示分区所在表空间，可采用如下方法：
+
+```shell
+omm=# SELECT 
+    p.relname AS partition_name,
+    p.parttype AS partition_type,
+    t.spcname AS tablespace_name,
+    p.boundaries
+FROM 
+    pg_partition p
+LEFT JOIN 
+    pg_tablespace t 
+ON 
+    p.reltablespace = t.oid
+WHERE 
+    p.parentid IN (SELECT oid FROM pg_class WHERE relname = 'partition_orders_4');omm-# omm-# omm-# omm-# omm-# omm-# omm-# omm-# omm-# omm-# omm-# omm-# 
+   partition_name   | partition_type | tablespace_name | boundaries 
+--------------------+----------------+-----------------+------------
+ partition_orders_4 | r              | example2        | 
+ p2                 | p              | example4        | {200}
+ p_4                | p              | example2        | {NULL}
+ p_3                | p              | example2        | {300}
+ p1                 | p              | example4        | {100}
+(5 rows)
+```
+
+##### 5.2.2.3 查询分区
+
+查询分区表的分区情况：
+
+```postgresql
+select relname,parttype,parentid,boundaries from pg_partition where parentid in(select oid from pg_class where relname=$分区表名称);
+```
+
+查询单独分区内的数据：
+
+```postgresql
+SELECT * FROM partition_orders_4 PARTITION(p2);
+SELECT * FROM partition_orders_4 PARTITION FOR(150);
+...
+```
+
+选择分区有两种方法，一是 partition（分区名称），二是 partition for（数值），此括号内的数值为所选分区范围内的任意值，如果定义分区时分区键不只一个，那么此括号内的数值个数应该与定义分区时使用的分区键个数相同，并且一一对应。
+
+##### 5.2.2.4 数据转移
+
+进行交换的普通表和分区必须满足如下条件：
+
+-  普通表和分区的列数目相同，对应列的信息严格一致，包括：列名、列的数据类型、列约束、列的 Collation 信息、列的存储参数、列的压缩信息等。
+-  普通表和分区的表压缩信息严格一致。
+-  普通表和分区的分布列信息严格一致。
+-  普通表和分区的索引个数相同，且对应索引的信息严格一致。
+-  普通表和分区的表约束个数相同，且对应表约束的信息严格一致。
+-  普通表不可以是临时表。
+
+实例：
+
+查看 orders 表中的数据量：
+
+```shell
+omm=# select count(*) from orders
+omm-# ;
+ count  
+--------
+ 300001
+(1 row)
+```
+
+将 orders 表中的数据转移到分区表 partition_orders_4 中：
+
+```shell
+omm=# insert into partition_orders_4 select * from orders;
+INSERT 0 300001
+```
+
+查看整个分区表情况，以及各分区情况:
+
+```shell
+omm=# select count(*) from partition_orders_4;
+ count  
+--------
+ 300001
+(1 row)
+```
+
+```postgresql
+select * from partition_orders_4;
+```
+
+![image-20241222225954760](assets/image-20241222225954760.png)
+
+```shell
+omm=# select count(*) from partition_orders_4 partition(p2);
+ count 
+-------
+    28
+(1 row)
+```
+
+```postgresql
+select * from partition_orders_4 partition(p2);
+```
+
+![image-20241222230202378](assets/image-20241222230202378.png)
+
+### 5.3 索引
+
+索引可以提高数据的访问速度，但同时也增加了插入、更新和删除操作的处理时间。所以是否要为表增加 索引，索引建立在哪些字段上，是创建索引前必须要考虑的问题。需要分析应用程序的业务处理、数据使用、经常被用作查询的条件或者被要求排序的字段来确定是否建立索引。
+
+**索引经常建立在数据库表中的以下列上：**
+
+- 在经常需要搜索查询的列上创建索引，可以加快搜索的速度。
+- 在作为主键的列上创建索引，强制该列的唯一性和组织表中数据的排列结构。
+- 在经常需要根据范围进行搜索的列上创建索引，因为索引已经排序，其指定的范围是连续的。
+- 在经常需要排序的列上创建索引，因为索引已经排序，这样查询可以利用索引的排序，加快排序查询时间。
+- 在经常使用 WHERE 子句的列上创建索引，加快条件的判断速度。
+- 为经常出现在关键字 ORDER BY、GROUP BY、DISTINCT 后面的字段建立索引。
+
+**索引方式：**
+
+1. 唯一索引：可用于约束索引属性值的唯一性，或者属性组合值的唯一性。如果一个表声明了唯一约束或 者主键，则 openGauss 自动在组成主键或唯一约束的字段上创建唯一索引（可能是多字段索引），以实现这些约束。目前，openGauss 只有 B-Tree 可以创建唯一索引。
+2. 多字段索引：一个索引可以定义在表中的多个属性上。目前，openGauss 中的 B-Tree 支持多字段索引，且最多可在 32 个字段上创建索引（全局分区索引最多支持 31 个字段）。
+3. 部分索引：建立在一个表的子集上的索引，这种索引方式只包含满足条件表达式的元组。
+4. 表达式索引：索引建立在一个函数或者从表中一个或多个属性计算出来的表达式上。表达式索引只有在查询时使用与创建时相同的表达式才会起作用。
+
+**注意：**
+
+- 索引创建成功后，系统会自动判断何时引用索引。当系统认为使用索引比顺序扫描更快时，就会使用索引。
+
+- 索引创建成功后，必须和表保持同步以保证能够准确地找到新数据，这样就增加了数据操作的负荷。因此需定期删除无用的索引。
+
+#### 5.3.1 普通表上创建管理索引
+
+##### 5.3.1.1 创建索引
+
+**步骤1：**创建 orders 表的备份 orderscopy2，并将数据导入
+
+```postgresql
+create table orderscopy2(
+o_orderkey integer,
+o_custkey integer,
+o_orderstatus char(1),
+o_totalprice decimal(15,2),
+o_orderdate date,
+o_orderpriority char(15),
+o_clerk char(15),
+o_shippriority integer,
+o_comment varchar(79),
+PRIMARY KEY (o_orderkey)
+)
+tablespace example2;
+
+INSERT INTO orderscopy2
+SELECT * FROM orders;
+```
+
+```shell
+[omm@cfde74516988 ~]$ gsql -f task5.sql
+gsql:task5.sql:13: NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "orderscopy2_pkey" for table "orderscopy2"
+CREATE TABLE
+INSERT 0 300001
+total time: 501  ms
+```
+
+**步骤2：**创建普通索引
+
+如果对于 orderscopy2 表，需要经常进行以下查询：
+
+```postgresql
+SELECT * FROM orderscopy2 WHERE o_totalprice>10000;
+```
+
+使用以下命令创建索引：
+
+```shell
+omm=# CREATE INDEX orderscopy2_index_totalprice ON orderscopy2(o_totalprice);
+CREATE INDEX
+```
+
+**步骤3：**创建多字段索引
+
+假如用户需要经常查询表 orderscopy2 中 `o_orderstatus` 是 ’O’，且 `o_totalprice` 小于 10000 的记录，使用以下命令进行查询：
+
+```postgresql
+SELECT * FROM orderscopy2 WHERE o_orderstatus='O' AND o_totalprice<10000;
+```
+
+使用以下命令在字段 `o_orderstatus` 和 `o_totalprice` 上定义一个多字段索引：
+
+```shell
+omm=# CREATE INDEX orderscopy2_index_more_column ON orderscopy2(o_orderstatus, o_totalprice);
+CREATE INDEX
+```
+
+**步骤4：**创建部分索引
+
+如果只需要查询 `o_orderstatus` 为 ’O’ 的记录：
+
+```postgresql
+SELECT * FROM orderscopy2 WHERE o_orderstatus=’O’;
+```
+
+可以创建部分索引来提升查询效率：
+
+```shell
+omm=# CREATE INDEX orderscopy2_part_index ON orderscopy2(o_orderstatus) WHERE o_orderstatus='O';
+CREATE INDEX
+```
+
+**步骤5：**创建表达式索引
+
+假如经常需要查询代号以 8 结尾的收银员的信息，执行如下命令进行查询：
+
+```postgresql
+SELECT * FROM orderscopy2 WHERE o_clerk like '%8';
+```
+
+可以为上面的查询创建表达式索引：
+
+```shell
+omm=# CREATE INDEX orderscopy2_para_index ON orderscopy2(reverse(o_clerk) varchar_pattern_ops);
+CREATE INDEX
+```
+
+##### 5.3.1.2 管理索引
+
+**步骤1：**查询索引
+
+执行如下命令查询系统和用户定义的所有索引：
+
+```shell
+omm=# SELECT RELNAME FROM PG_CLASS WHERE RELKIND='i';
+                    relname                    
+-----------------------------------------------
+ region_pkey
+ nation_pkey
+ part_pkey
+ supplier_pkey
+ partsupp_pkey
+ customer_pkey
+ lineitem_pkey
+ orders_pkey
+ lineitemcopy1_pkey
+ pg_toast_2619_index
+ pg_toast_3220_index
+ pg_toast_1255_index
+ lineitemcopy2_pk
+ lineitemcopy2_uk
+ customercopy1_pkey
+ orderscopy2_pkey
+ orderscopy2_index_totalprice
+ orderscopy2_index_more_column
+ orderscopy1_pkey
+ orderscopy2_part_index
+ orderscopy2_para_index
+ ...
+```
+
+可看到上述创建的索引。
+
+\di+ 可以查询用户定义的所有索引：
+
+![image-20241223191808227](assets/image-20241223191808227.png)
+
+查询指定索引的信息：
+
+![image-20241223191909002](assets/image-20241223191909002.png)
+
+**步骤2：**重命名索引
+
+执行如下命令对索引 orderscopy2_index_more_column 重命名为 orderscopy2_index_orderstatus_totalprice：
+
+```shell
+omm=# ALTER INDEX orderscopy2_index_more_column RENAME TO orderscopy2_index_orderstatus_totalprice;
+ALTER INDEX
+```
+
+用 \di+ 查看，索引重命名成功：
+
+![image-20241223202855004](assets/image-20241223202855004.png)
+
+**步骤3：**删除索引
+
+删除 orderscopy2_para_index 索引：
+
+```shell
+omm=# DROP INDEX orderscopy2_para_index;
+DROP INDEX
+```
+
+可看到删除成功：
+
+![image-20241223203044548](assets/image-20241223203044548.png)
+
+#### 5.3.2 分区表上创建管理索引
+
+##### 5.3.2.1 创建索引
+
+分区表索引分为 LOCAL 索引与 GLOBAL 索引，一个 LOCAL 索引对应一个具体分区(有多少个分区就有多少个索引文件)，而 GLOBAL 索引则对应整个分区表（只有一个索引文件）。
+
+**步骤1：**以 orders 表为例创建一个分区表
+
+```postgresql
+create table partition_orders_0(
+o_orderkey integer,
+o_custkey integer,
+o_orderstatus char(1),
+o_totalprice decimal(15,2),
+o_orderdate date,
+o_orderpriority char(15),
+o_clerk char(15),
+o_shippriority integer,
+o_comment varchar(79),
+PRIMARY KEY (o_orderkey)
+)
+tablespace example2
+partition by range(o_orderkey)
+(
+partition p1 values less than(100),
+partition p2 values less than(200),
+partition p3 values less than(300),
+partition p4 values less than(maxvalue)
+);
+```
+
+```shell
+[omm@cfde74516988 ~]$ gsql -f task6.sql
+gsql:task6.sql:20: NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "partition_orders_0_pkey" for table "partition_orders_0"
+CREATE TABLE
+total time: 13  ms
+```
+
+**步骤2：**创建 GLOBAL 索引
+
+在 o_custkey 上创建分区表 GLOBAL 索引，存储在表空间 example2 上：
+
+```shell
+omm=# create index global_index_custkey on partition_orders_0(o_custkey) global tablespace example2;
+CREATE INDEX
+```
+
+![image-20241223205155073](assets/image-20241223205155073.png)
+
+在容器内 `/var/lib/opengauss/data/pg_location/tablespace/tablespace_2/16384` 路径下可看到：
+
+<img src="assets/image-20241223210040501.png" alt="image-20241223210040501" style="zoom:50%;" />
+
+只有一个索引文件（前面 4 个是上面创建的 partition_orders_0 分区表，4 个分区对应 4 个文件）。
+
+**步骤3：**创建不指定索引分区名称的 LOCAL 索引
+
+在 o_totalprice 上创建分区表 LOCAL 索引，不指定索引分区的名称，存储在 example3 上（原表与索引可以分别存储在不同的表空间上）
+
+```shell
+omm=# create index local_index_totalprice on partition_orders_0(o_totalprice) local tablespace example3;
+CREATE INDEX
+omm=# \q
+[omm@cfde74516988 16384]$ cd ../../../tablespace_3
+[omm@cfde74516988 tablespace_3]$ cd PG_9.2_201611171_gaussdb/
+[omm@cfde74516988 PG_9.2_201611171_gaussdb]$ cd 16384/
+[omm@cfde74516988 16384]$ ls -l
+total 32
+-rw------- 1 omm omm    0 Dec 22 09:50 16725
+-rw------- 1 omm omm 8192 Dec 23 13:23 16841
+-rw------- 1 omm omm 8192 Dec 23 13:23 16842
+-rw------- 1 omm omm 8192 Dec 23 13:23 16843
+-rw------- 1 omm omm 8192 Dec 23 13:23 16844
+```
+
+有 4 个索引文件（因为有 4 个分区）。
+
+**步骤4：**创建指定索引分区名称的 LOCAL 索引
+
+在 o_shippriority 上创建分区表 LOCAL 索引，指定索引分区的名称，p1, p2 分区索引存储在 example3 上， p3, p4f 分区索引存储在 example4 上（不同分区的索引可以分别存储在不同的表空间上）：
+
+```shell
+omm=# create index local_index_shippriority on partition_orders_0(o_shippriority) local
+(
+partition p1_index,
+partition p2_index,
+partition p3_index tablespace example4,
+partition p4_index tablespace example4
+) tablespace example3;omm-# omm-# omm(# omm(# omm(# omm(# omm(# omm(# omm(# omm(# omm(# omm(# 
+CREATE INDEX
+```
+
+创建成功后查看：
+
+![image-20241223211203221](assets/image-20241223211203221.png)
+
+```shell
+[omm@cfde74516988 tablespace]$ ls
+tablespace_1  tablespace_2  tablespace_3  tablespace_4
+[omm@cfde74516988 tablespace]$ cd tablespace_3
+[omm@cfde74516988 tablespace_3]$ cd PG_9.2_201611171_gaussdb/
+[omm@cfde74516988 PG_9.2_201611171_gaussdb]$ cd 16384/
+[omm@cfde74516988 16384]$ ls -l
+total 16
+-rw------- 1 omm omm    0 Dec 22 09:50 16725
+-rw------- 1 omm omm 8192 Dec 23 13:07 16835
+-rw------- 1 omm omm 8192 Dec 23 13:07 16836
+[omm@cfde74516988 16384]$ cd ../../../tablespace_4
+[omm@cfde74516988 tablespace_4]$ cd PG_9.2_201611171_gaussdb/
+[omm@cfde74516988 PG_9.2_201611171_gaussdb]$ cd 16384/
+[omm@cfde74516988 16384]$ ls -l
+total 32
+-rw------- 1 omm omm 8192 Dec 22 14:58 16798
+-rw------- 1 omm omm 8192 Dec 22 14:58 16809
+-rw------- 1 omm omm 8192 Dec 23 13:07 16837
+-rw------- 1 omm omm 8192 Dec 23 13:07 16838
+```
+
+分别在 example3 有 2 个索引文件和 example4 有 2 个索引文件。
+
+##### 5.3.2.2 管理索引
+
+**步骤1：**修改索引分区所在的表空间
+
+将分区索引 p1_index 从 example3 移到 example2：
+
+```shell
+omm=# ALTER INDEX local_index_shippriority MOVE PARTITION p1_index TABLESPACE example2;
+ALTER INDEX
+```
+
+**步骤2：**重命名索引分区
+
+将分区索引 p2_index 重命名为 p2_index_new：
+
+```shell
+omm=# ALTER INDEX local_index_shippriority RENAME PARTITION p2_index TO p2_index_new;
+ALTER INDEX
+```
+
+**步骤3：**删除索引
+
+要删除索引只能删除整个索引，不能删除单独的分区索引：
+
+```shell
+omm=# drop index global_index_custkey;
+DROP INDEX
+omm=# drop index local_index_totalprice;
+DROP INDEX
+omm=# drop index local_index_shippriority;
+DROP INDEX
+```
+
+### 5.4 OpenGauss 段页式特性
+
+由于段页式特性在 OpenGauss 3.1.0 及以上才能使用，故本部分实验在某其他组的 OpenGauss 5.0.3 容器进行。
+
+openGauss 通用的普通表，每个数据表对应一个逻辑逻辑上的大文件（最大 32T），该逻辑文件又按照固定的大小划分多个实际文件存在对应的数据库目录下面。所以，每张数据表随着数据量的增多，底层的数据存储所需文件数量会逐渐增多。同时，openGauss 对外提供 hashbucket 表、大分区表等特性，每张数据表会被拆分为若干个子表，底层所需文件数量更是成倍增长。由此，这种存储管理模式存在以下问题：
+
+1. 对文件系统依赖大，无法进行细粒度的控制提升可维护性；
+
+2. 大数据量下文件句柄过多，目前只能依赖虚拟句柄来解决，影响系统性能；
+
+3. 小文件数量过多会导致全量 build、全量备份等场景下的随机 IO 问题，影响性能；
+
+为了解决以上问题，openGauss 引入段页式存储管理机制，类似于操作系统的段页式内存管理，但是在实现机制上区别很大。
+
+本实验通过在 TPC-H 测试基准的 orders 表的备份表上应用段页式存储的相关函数操作，观察应用段页式存储后的效果。
+
+#### 5.4.1 使用指导
+
+用户在用 SQL 语句 create table 建表时可以通过指定参数 segment=on，使得行存表可以使用段页式的方式存储数据。目前段页式存储不支持列存表。段页式表空间是自动创建的，不需要用户有额外的命令。
+
+1. **以订单表 orders 为例，指定参数 segment=on，创建段页式普通表**
+
+`zzy.sql`
+
+```postgresql
+CREATE TABLE orderszzy(
+o_orderkey integer,
+o_custkey integer,
+o_orderstatus char(1),
+o_totalprice decimal(15,2),
+o_orderdate date,
+o_orderpriority char(15),
+o_clerk char(15),
+o_shippriority integer,
+o_comment varchar(79),
+PRIMARY KEY (o_orderkey)
+)
+with(segment=on);
+```
+
+```shell
+omm@opengauss:~/openGauss$ gsql -d homework -f zzy.sql
+gsql:zzy.sql:13: NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "orderszzy_pkey" for table "orderszzy"
+CREATE TABLE
+total time: 12  ms
+```
+
+**创建成功后，导入 orders 表数据。**
+
+```shell
+homework=# insert into orderszzy select * from orders;
+INSERT 0 300001
+```
+
+为了让用户更好使用段页式功能，openGauss 提供了两个 built in 的系统函数，显示 extent 的使用情况。用户可以使用这两个视图，决定是否回收和回收哪一部分的数据。
+
+- 
+
+```postgresql
+local_segment_space_info(tablespacename TEXT, databasename TEXT)
+```
+
+描述：输出为该表空间下所有 ExtentGroup 的使用信息。
+
+| 名称             | 描述                                                         |
+| ---------------- | :----------------------------------------------------------- |
+| node_name        | 节点名称                                                     |
+| extent_size      | 该 ExtentGroup 的 extent 规格，单位是 block 数               |
+| forknum          | Fork 号                                                      |
+| total_blocks     | 物理文件总 extent 数目                                       |
+| meta_data_blocks | 表空间管理的 metadata 占用的 block 数，只包括 space header、map page 等，不包括 segment head |
+| used_data_blocks | 存数据占用的 extent 数目。包括 segment head                  |
+| utilization      | 使用的 block 数占总 block 数的百分比，即 (used_data_blocks + meta_data_block) / total_blocks |
+| high_water_mark  | 高水位线，被分配出去的 extent，最大的物理页号。超过高水位线的 block 都没有被使用，可以被直接回收 |
+
+以新建 orderszzy 表所在表空间和数据库为例，查看 local_segment_space_info() 函数的输出结果：
+
+![image-20241226213248934](assets/image-20241226213248934.png)
+
+- 
+
+```postgresql
+pg_stat_segment_extent_usage(int4 tablespace oid, int4 database oid, int4 extent_type, int4 forknum)
+```
+
+描述：每次返回一个 ExtentGroup 中，每个被分配出去的 extent 的使用情况。extent_type 表示 ExtentGroup 的类型，合理取值为 [1,5] 的 int 值。在此范围外的会报 error。forknum 表示 fork 号，合法取值为 [0,4] 的 int 值，目前只有三种值有效，数据文件为 0，FSM 文件为 1，visibility map 文件为 2。
+
+| 名称          | 描述                                                         |
+| :------------ | ------------------------------------------------------------ |
+| start_block   | Extent 的起始物理页号                                        |
+| extent_size   | Extent 的大小                                                |
+| usage_type    | Extent 的使用类型，比如 segment head、data extent 等         |
+| ower_location | 有指针指向该 extent 的对象的位置。比如 data extent 的 owner 就是它所属的 segment 的 head 位置 |
+| special_data  | 该 extent 在它 owner 中的位置。该字段的数据与使用类型有关。比如 data extent 的 special data 就是它在所属 segment 中的 extent id |
+
+查找 orderszzy 表所在表空间和数据库的 oid，查看 pg_stat_segment_extent_usage() 函数的输出结果：
+
+![image-20241226214115899](assets/image-20241226214115899.png)
+
+select * from pg_stat_segment_extent_usage((select oid::int4 from pg_tablespace where spcname='pg_default'), (select oid::int4 from pg_database where datname='homework'), 2, 0);
+
+![image-20241226214503161](assets/image-20241226214503161.png)
+
+- 
+
+```postgresql
+gs_space_shrink(int4 tablespace, int4 database, int4 extent_type, int4 forknum)
+```
+
+描述：当前节点上对指定段页式空间做物理空间收缩。注意，目前只支持对当前连接的 database 做 shrink。（对指定段页式空间做物理空间收缩），传入的参数是 tablespace 和 database 的 oid，extent_type 为 [2,5] 的 int 值。注意：extent_type = 1 表示段页式元数据，目前不支持对元数据所在的物理文件做收缩。该函数仅限工具使用，不建议用户直接使用。
+
+## 6 数据库查询优化
+
+### 一、openGauss 执行计划的查看与分析
+
+#### 实验步骤
+
+1. **查询1**： 查询零部件表中零售价小于920，且供应商key为5的零件key。
+2. **查询2**： 查询客户表中账户余额小于1000且客户国家为ALGERIA的客户名称和电话。
+
+#### 实验代码
+
+```sql
+-- 查询1
+EXPLAIN  
+SELECT p_partkey  
+FROM part  
+WHERE p_retailprice < 920 AND p_partkey IN (SELECT ps_partkey FROM partsupp WHERE ps_suppkey = 5);
+
+-- 查询2
+EXPLAIN  
+SELECT c_name, c_phone  
+FROM customer  
+WHERE c_acctbal < 1000 AND c_nationkey = (SELECT n_nationkey FROM nation WHERE n_name = 'ALGERIA');
+```
+
+---
+
+#### 执行计划
+
+##### 查询1
+
+###### 执行计划
+
+```sql
+QUERY PLAN
+------------------------------------------------------------------------------------------
+ Nested Loop Semi Join  (cost=0.00..1999.07 rows=78 width=4)
+   ->  Seq Scan on part  (cost=0.00..1352.00 rows=281 width=4)
+         Filter: (p_retailprice < 920::numeric)
+   ->  Index Only Scan using partsupp_pkey on partsupp  (cost=0.00..7.19 rows=21 width=4)
+         Index Cond: ((ps_partkey = part.p_partkey) AND (ps_suppkey = 5))
+(5 rows)
+```
+
+###### 关系代数的实现方式
+
+1. 使用了半连接（Semi Join），结合了顺序扫描和索引扫描，适合在数据量较大的情况下优化性能。通过索引扫描`partsupp`表，减少了需要扫描的数据行数。
+
+###### 执行成本
+
+1. 外层扫描`part`表的成本：`0.00..1352.00`
+2. 内层索引扫描`partsupp`表的成本：`0.00..7.19`
+3. 总体成本：`0.00..1999.07`，表示该查询的执行成本相对较低，主要是因为`partsupp`表上的索引扫描很高效。
+
+---
+
+##### 查询2
+
+###### 执行计划
+
+```sql
+QUERY PLAN
+----------------------------------------------------------------
+ Seq Scan on customer  (cost=1.31..1170.31 rows=5495 width=35)
+   Filter: ((c_acctbal < 1000::numeric) AND (c_nationkey = $0))
+   InitPlan 1 (returns $0)
+     ->  Seq Scan on nation  (cost=0.00..1.31 rows=1 width=4)
+           Filter: (n_name = 'ALGERIA'::bpchar)
+(5 rows)
+```
+
+###### 关系代数的实现方式
+
+1. 使用了两次顺序扫描：一次扫描`nation`表查找`ALGERIA`，然后对`customer`表进行扫描，利用内层查询返回的`nationkey`过滤外层结果。由于没有合适的索引，这个查询的执行效率较低。
+
+###### 执行成本
+
+1. 外层扫描`customer`表的成本：`cost=1.31..1170.31`
+2. 内层扫描`nation`表的成本：`cost=0.00..1.31`
+3. 总体成本：`cost=1.31..1170.31`，这个查询的总体成本较高，主要是由于`customer`表的大量数据需要扫描。
+
+---
+
+### 二、观察视图查询和 WITH 临时视图查询的执行计划
+
+#### 实验步骤
+
+1. 在 `nation` 表上创建视图 `nation_view`。
+2. 使用 WITH 临时视图 `nation_tempview`。
+3. 比较视图、WITH 临时视图和直接查询的执行计划和执行时间。
+
+#### 实验代码
+
+```sql
+-- 创建视图
+CREATE VIEW nation_view AS
+SELECT * FROM nation;
+
+-- 通过视图查询
+EXPLAIN ANALYZE
+SELECT n_name FROM nation_view;
+
+-- 使用 WITH 临时视图查询
+EXPLAIN ANALYZE
+WITH nation_tempview AS (
+    SELECT * FROM nation
+)
+SELECT * FROM nation_tempview;
+
+-- 直接查询
+EXPLAIN ANALYZE  
+SELECT n_name  
+FROM nation;
+```
+
+---
+
+#### 执行计划
+
+##### 通过视图查询
+
+###### 执行计划
+
+```sql
+QUERY PLAN
+----------------------------------------------------------------------------------------------------
+ Seq Scan on nation  (cost=0.00..1.25 rows=25 width=104) (actual time=0.009..0.015 rows=25 loops=1)
+ Total runtime: 0.070 ms
+```
+
+###### 分析
+
+1. **执行方式：**顺序扫描 `nation` 表。
+2. **成本：**`cost=0.00..1.25`，表扫描效率较高。
+3. **总运行时间：**`0.070 ms`，性能较优。
+4. **结论：**对于`nation`表这种数据量较小的表，顺序扫描是非常高效的，因此即使是通过视图查询，执行时间也非常快。
+
+---
+
+##### 使用 WITH 临时视图查询
+
+###### 执行计划
+
+```sql
+QUERY PLAN
+-------------------------------------------------------------------------------------------------------------
+ CTE Scan on nation_tempview  (cost=1.25..1.75 rows=25 width=434) (actual time=0.024..0.047 rows=25 loops=1)
+   CTE nation_tempview
+     ->  Seq Scan on nation  (cost=0.00..1.25 rows=25 width=434) (actual time=0.017..0.024 rows=25 loops=1)
+ Total runtime: 0.178 ms
+```
+
+###### 分析
+
+1. **执行方式：**引入 CTE（临时视图）。
+2. **成本：**`cost=1.25..1.75`，引入额外的扫描和数据存储开销。
+3. **总运行时间：**`0.178 ms`，高于视图查询和直接查询。
+4. **结论：**使用`WITH`临时视图查询时，相比直接查询和视图查询，会引入一些额外的开销。尽管CTE提供了查询结构上的便利（尤其是在复杂查询中），但在这种简单查询下，开销较大。
+
+---
+
+##### 直接查询
+
+###### 执行计划
+
+```sql
+QUERY PLAN
+----------------------------------------------------------------------------------------------------
+ Seq Scan on nation  (cost=0.00..1.25 rows=25 width=104) (actual time=0.009..0.015 rows=25 loops=1)
+ Total runtime: 0.065 ms
+```
+
+###### 分析
+
+1. **执行方式：**顺序扫描。
+2. **成本：**`cost=0.00..1.25`，与视图查询一致。
+3. **总运行时间：**`0.065 ms`，为最优性能。
+
++ **结论：**直接查询的执行时间和视图查询非常相似，几乎没有额外的性能损耗，特别是在查询非常简单时。
+
+---
+
+### 三、优化 SQL 语句
+
+#### 3.1.复合索引左前缀
+
+##### 实验步骤
+
+1. 在 `lineitem_new` 表上创建复合索引。
+2. 比较有索引和无索引的查询性能。
+
+##### 实验代码
+
+```sql
+-- 创建备份表
+CREATE TABLE lineitem_new AS TABLE lineitem;
+
+-- 创建复合索引
+CREATE INDEX lineitem_index ON lineitem_new(l_quantity, l_tax, l_extendedprice);
+
+-- 无索引查询l_quantity=24的全部数据
+EXPLAIN ANALYZE  
+SELECT *  
+FROM lineitem  
+WHERE l_quantity = 24;
+
+-- 使用最左前缀索引查询l_quantity=24的全部数据
+EXPLAIN ANALYZE  
+SELECT *  
+FROM lineitem_new  
+WHERE l_quantity = 24;
+
+-- 无索引查询l_tax=0.02的全部数据
+EXPLAIN ANALYZE  
+SELECT *  
+FROM lineitem  
+WHERE l_tax=0.02;
+
+-- 使用最左前缀索引查询l_tax=0.02的全部数据
+EXPLAIN ANALYZE  
+SELECT *  
+FROM lineitem_new  
+WHERE l_tax=0.02;
+
+```
+
+
+
+##### 执行计划
+
+###### **无索引查询 **`**l_quantity = 24**`** 的全部数据**
+
+**执行计划：**
+
+```plain
+Seq Scan on lineitem  (cost=0.00..97408.30 rows=20950 width=129) (actual time=58.944..275.978 rows=18229 loops=1)
+   Filter: (l_quantity = 24::numeric)
+   Rows Removed by Filter: 885624
+Total runtime: 276.975 ms
+(4 rows)
+```
+
+**分析：**
+
++ **执行方式：无索引查询对**`**lineitem**`**表进行了顺序扫描（**`**Seq Scan**`**）。**
++ **过滤条件：**`**l_quantity = 24**`**。**
++ **行数：查询返回的行数为18229行，过滤掉了885624行不符合条件的记录。**
++ **实际执行时间：执行时间为 **`**276.975 ms**`**。这是因为顺序扫描需要遍历整个表，过滤掉不满足条件的行，过程较为耗时。**
+
+###### ** 使用最左前缀索引查询 **`**l_quantity = 24**`** 的全部数据**
+
+**执行计划：**
+
+```plain
+Bitmap Heap Scan on lineitem_new  (cost=512.73..20123.63 rows=18619 width=129) (actual time=6.430..40.468 rows=18229 loops=1)
+   Recheck Cond: (l_quantity = 24::numeric)
+   ->  Bitmap Index Scan on lineitem_index  (cost=0.00..508.07 rows=18619 width=0) (actual time=5.275..5.275 rows=18229 loops=1)
+         Index Cond: (l_quantity = 24::numeric)
+Total runtime: 41.252 ms
+(5 rows)
+```
+
+**分析：**
+
++ **执行方式：使用了**`**Bitmap Heap Scan**`**与**`**Bitmap Index Scan**`**，首先通过索引扫描来找出满足条件的行，然后通过堆扫描获取数据。**
++ **索引条件****：**`**l_quantity = 24**`**。**
++ **实际执行时间：执行时间为 **`**41.252 ms**`**，显著低于无索引查询的执行时间。**
+
+###### ** 无索引查询 **`**l_tax = 0.02**`** 的全部数据**
+
+**执行计划：**
+
+```plain
+Seq Scan on lineitem  (cost=0.00..97408.30 rows=117803 width=129) (actual time=56.628..287.455 rows=100598 loops=1)
+   Filter: (l_tax = .02)
+   Rows Removed by Filter: 803255
+Total runtime: 291.463 ms
+(4 rows)
+```
+
+**分析：**
+
++ **执行方式：无索引查询对**`**lineitem**`**表进行了顺序扫描（**`**Seq Scan**`**）。**
++ **过滤条件：**`**l_tax = 0.02**`**。**
++ **行数：查询返回的行数为100598行，过滤掉了803255行不符合条件的记录。**
++ **实际执行时间：执行时间为 **`**291.463 ms**`**，也比索引查询的时间长，原因与**`**l_quantity = 24**`**查询相同，都是因为需要扫描整个表。**
+
+###### **使用最左前缀索引查询 **`**l_tax = 0.02**`** 的全部数据**
+
+**执行计划：**
+
+```plain
+Seq Scan on lineitem_new  (cost=0.00..30066.16 rows=97616 width=129) (actual time=0.044..144.631 rows=100598 loops=1)
+   Filter: (l_tax = .02)
+   Rows Removed by Filter: 803255
+Total runtime: 148.464 ms
+(4 rows)
+```
+
+**分析：**
+
++ **执行方式：使用了最左前缀索引（**`**lineitem_index**`**）进行扫描。**
++ **过滤条件：**`**l_tax = 0.02**`**。**
++ **实际执行时间：执行时间为 **`**148.464 ms**`**，比无索引查询快，但没有比最左前缀索引的**`**l_quantity = 24**`**查询更快。**
+
+---
+
+1. **无索引查询**
+   - 执行时间较长，顺序扫描导致高开销。
+2. **使用复合索引**
+   - 查询性能显著提升，索引有效降低了扫描行数。
+
+---
+
+##### 结果分析
+
+###### ** 执行结果是否一样？**
+
++ `**l_quantity = 24**`** 查询的执行结果一致，无论是使用最左前缀索引，还是无索引查询，返回的结果行数都是一致的，都是18229行。**
++ `**l_tax = 0.02**`** 查询的执行结果也一致，无论是使用最左前缀索引，还是无索引查询，返回的结果行数都是一致的，都是100598行。**
+
+###### **对比执行效果和执行速度**
+
++ **无索引查询 vs 使用最左前缀索引查询 **
+  - `**l_quantity = 24**`**执行时间差异：无索引查询的执行时间为 **`276.975 ms`**，而使用索引查询的执行时间为 **`41.252 ms`**，索引查询快得多。**
+  - `**l_tax = 0.02**`**执行时间差异：无索引查询的执行时间为 **`291.463 ms`**，使用索引查询的执行时间为 **`148.464 ms`**，同样索引查询较快，但差异没有**`l_quantity = 24`**的查询那么明显。**
+
+###### **解释执行时间差异的原因**
+
++ **索引的使用：最左前缀索引对于查询条件中第一个列的过滤效果最为显著。对于**`l_quantity = 24`**和**`l_tax = 0.02`**这两个查询，索引帮助减少了需要扫描的行数，尤其在有大量不符合条件的行时，索引的作用尤为明显。**
++ **查询条件的不同：**
+  - **对于**`**l_quantity = 24**`**，查询的结果集行数相对较少（18229行），使用索引可以显著提高查询性能。**
+  - **对于**`**l_tax = 0.02**`**，虽然查询条件相对更复杂，涉及到浮动的数值，但是由于没有索引列的顺序，扫描的行数相对较多（100598行）。因此，索引的作用虽然存在，但在这种情况下，索引的效率提升比**`**l_quantity = 24**`**时要小一些。**
++ **Bitmap索引的使用：在最左前缀索引查询中，**`Bitmap Index Scan`**会首先在索引中查找符合条件的行，并生成一个位图（Bitmap），然后通过**`Bitmap Heap Scan`**在数据表中读取相关数据。这种方法减少了对数据表的重复扫描，使得查询速度更快。无索引查询则需要顺序扫描整个表，比较慢。**
+
+---
+
+##### 结论
+
++ **执行结果****在两种查询中是相同的，无论是否使用索引。**
++ **执行时间****上，使用最左前缀索引的查询显著优于无索引查询，尤其在涉及大量数据时，索引查询的性能更为突出。**
++ **差异原因：索引通过减少扫描的数据量，加速了查询过程。顺序扫描则需要扫描整个表，导致执行时间较长。**`**Bitmap Index Scan**`**能显著提升查询效率，尤其是在匹配条件较多的情况下。**
+
+
+
+#### 3.2 多表连接操作，在连接属性上建立索引
+
+##### 实验步骤
+
+1. 创建 `lineitem` 表的备份表 `lineitem_new`。  
+2. 在 `lineitem_new` 上删除实验 3.1 创建的组合索引，并在 `l_suppkey` 和 `l_partkey` 上分别创建两个索引：  
+   - 索引 1：`lineitem_index1`，针对 `l_suppkey`。  
+   - 索引 2：`lineitem_index2`，针对 `l_partkey`。
+3. 编写并执行两组 SQL 语句：  
+   - 使用索引和不使用索引分别查询 `supplier` 表中供应商手机号。  
+   - 使用索引和不使用索引分别查询 `part` 表中零件名称。
+4. 对比两组查询的执行计划和查询执行的耗时。
+
+##### 实验代码
+
+###### 索引创建
+
+```sql
+DROP INDEX IF EXISTS lineitem_index;
+CREATE INDEX lineitem_index1 ON lineitem_new(l_suppkey);
+CREATE INDEX lineitem_index2 ON lineitem_new(l_partkey);
+```
+
+###### 无索引查询供应商手机号
+
+```sql
+EXPLAIN ANALYZE  
+SELECT DISTINCT l_suppkey, s_phone  
+FROM lineitem, supplier  
+WHERE l_suppkey = 10 AND l_suppkey = supplier.s_suppkey;
+```
+
+###### 使用索引查询供应商手机号
+
+```sql
+EXPLAIN ANALYZE  
+SELECT DISTINCT l_suppkey, s_phone  
+FROM lineitem_new, supplier  
+WHERE l_suppkey = 10 AND l_suppkey = supplier.s_suppkey;
+```
+
+###### 无索引查询零件名称
+
+```sql
+EXPLAIN ANALYZE  
+SELECT DISTINCT l_partkey, p_name  
+FROM lineitem, part  
+WHERE l_partkey = 928 AND l_partkey = part.p_partkey;
+```
+
+###### 使用索引查询零件名称
+
+```sql
+EXPLAIN ANALYZE  
+SELECT DISTINCT l_partkey, p_name  
+FROM lineitem_new, part  
+WHERE l_partkey = 928 AND l_partkey = part.p_partkey;
+```
+
+##### 执行计划
+
+###### 无索引查询供应商手机号
+
+```sql
+                                                             QUERY PLAN
+-------------------------------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=97424.11..97424.12 rows=1 width=20) (actual time=235.376..235.376 rows=1 loops=1)
+   Group By Key: lineitem.l_suppkey, supplier.s_phone
+   ->  Nested Loop  (cost=0.00..97421.60 rows=503 width=20) (actual time=63.298..235.224 rows=450 loops=1)
+         ->  Index Scan using supplier_pkey on supplier  (cost=0.00..8.27 rows=1 width=20) (actual time=0.037..0.039 rows=1 loops=1)
+               Index Cond: (s_suppkey = 10)
+         ->  Seq Scan on lineitem  (cost=0.00..97408.30 rows=503 width=4) (actual time=63.255..235.093 rows=450 loops=1)
+               Filter: (l_suppkey = 10)
+               Rows Removed by Filter: 903403
+ Total runtime: 235.540 ms
+(9 rows)
+```
+
+###### 使用索引查询供应商手机号
+
+```sql
+                                                               QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=1570.10..1570.11 rows=1 width=20) (actual time=4.265..4.265 rows=1 loops=1)
+   Group By Key: lineitem_new.l_suppkey, supplier.s_phone
+   ->  Nested Loop  (cost=11.75..1567.91 rows=439 width=20) (actual time=0.400..4.044 rows=450 loops=1)
+         ->  Index Scan using supplier_pkey on supplier  (cost=0.00..8.27 rows=1 width=20) (actual time=0.013..0.015 rows=1 loops=1)
+               Index Cond: (s_suppkey = 10)
+         ->  Bitmap Heap Scan on lineitem_new  (cost=11.75..1555.25 rows=439 width=4) (actual time=0.379..3.880 rows=450 loops=1)
+               Recheck Cond: (l_suppkey = 10)
+               ->  Bitmap Index Scan on lineitem_index1  (cost=0.00..11.64 rows=439 width=0) (actual time=0.218..0.218 rows=450 loops=1)
+                     Index Cond: (l_suppkey = 10)
+ Total runtime: 4.401 ms
+(10 rows)
+```
+
+###### 无索引查询零件名称
+
+```sql
+                                                         QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=97416.96..97416.97 rows=1 width=42) (actual time=236.517..236.518 rows=1 loops=1)
+   Group By Key: lineitem.l_partkey, part.p_name
+   ->  Nested Loop  (cost=0.00..97416.83 rows=26 width=42) (actual time=116.263..236.486 rows=14 loops=1)
+         ->  Index Scan using part_pkey on part  (cost=0.00..8.27 rows=1 width=42) (actual time=0.761..0.763 rows=1 loops=1)
+               Index Cond: (p_partkey = 928)
+         ->  Seq Scan on lineitem  (cost=0.00..97408.30 rows=26 width=4) (actual time=115.489..235.704 rows=14 loops=1)
+               Filter: (l_partkey = 928)
+               Rows Removed by Filter: 903839
+ Total runtime: 236.661 ms
+(9 rows)
+```
+
+###### 使用索引查询零件名称
+
+```sql
+                                                              QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=103.02..103.03 rows=1 width=42) (actual time=0.413..0.414 rows=1 loops=1)
+   Group By Key: lineitem_new.l_partkey, part.p_name
+   ->  Nested Loop  (cost=4.53..102.90 rows=23 width=42) (actual time=0.188..0.370 rows=14 loops=1)
+         ->  Index Scan using part_pkey on part  (cost=0.00..8.27 rows=1 width=42) (actual time=0.018..0.020 rows=1 loops=1)
+               Index Cond: (p_partkey = 928)
+         ->  Bitmap Heap Scan on lineitem_new  (cost=4.53..94.40 rows=23 width=4) (actual time=0.160..0.328 rows=14 loops=1)
+               Recheck Cond: (l_partkey = 928)
+               ->  Bitmap Index Scan on lineitem_index2  (cost=0.00..4.52 rows=23 width=0) (actual time=0.131..0.131 rows=14 loops=1)
+                     Index Cond: (l_partkey = 928)
+ Total runtime: 0.595 ms
+(10 rows)
+```
+
+##### 结果分析
+
+###### 无索引与有索引查询供应商手机号
+
+**查询目标**：列出在 `lineitem` 表中某个 `l_suppkey`（供应商 ID）对应的所有供应商的手机号。
+
+**无索引查询：**
+
++ **查询计划**：
+  - 使用 `Nested Loop` 连接 `supplier` 和 `lineitem`。
+  - 在 `supplier` 表上使用主键索引进行扫描（`supplier_pkey`），并通过 `s_suppkey = 10` 查找供应商。
+  - 对于 `lineitem` 表，执行顺序扫描（`Seq Scan`），然后根据 `l_suppkey = 10` 筛选记录。
+  - 运行时间：235.540 ms。
+
+**有索引查询：**
+
++ **查询计划**：
+  - 使用 `Nested Loop` 连接 `supplier` 和 `lineitem_new`。
+  - 在 `supplier` 表上同样使用主键索引进行扫描（`supplier_pkey`），通过 `s_suppkey = 10` 查找供应商。
+  - 对于 `lineitem_new` 表，使用 `Bitmap Heap Scan`，并通过 `l_suppkey = 10` 条件进行索引扫描（`Bitmap Index Scan`），因为已经在 `l_suppkey` 上建立了索引。
+  - 运行时间：4.401 ms。
+
+**执行时间差异的原因：**
+
++ **无索引查询**使用了全表扫描（`Seq Scan`），因此需要检查整个 `lineitem` 表中是否有符合条件的记录。这导致了查询时间较长（235.540 ms）。
++ **有索引查询**使用了 `Bitmap Index Scan`，这大大减少了扫描的范围，避免了对整个 `lineitem` 表的顺序扫描，从而提高了查询效率，显著缩短了执行时间（4.401 ms）。
++ 主要的性能提升来自索引的使用，它使得查询能够直接通过索引定位到符合条件的行，而无需逐行扫描整个表。
+
+###### 无索引与有索引查询零件名称
+
+**查询目标**：列出在 `lineitem` 表中某个 `l_partkey`（零件 ID）对应的所有零件名称。
+
+**无索引查询：**
+
++ **查询计划**：
+  - 使用 `Nested Loop` 连接 `part` 和 `lineitem`。
+  - 在 `part` 表上使用主键索引进行扫描（`part_pkey`），通过 `p_partkey = 928` 查找零件。
+  - 对于 `lineitem` 表，执行顺序扫描（`Seq Scan`），然后根据 `l_partkey = 928` 筛选记录。
+  - 运行时间：236.661 ms。
+
+**有索引查询：**
+
++ **查询计划**：
+  - 使用 `Nested Loop` 连接 `part` 和 `lineitem_new`。
+  - 在 `part` 表上同样使用主键索引进行扫描（`part_pkey`），通过 `p_partkey = 928` 查找零件。
+  - 对于 `lineitem_new` 表，使用 `Bitmap Heap Scan`，并通过 `l_partkey = 928` 条件进行索引扫描（`Bitmap Index Scan`），因为已经在 `l_partkey` 上建立了索引。
+  - 运行时间：0.595 ms。
+
+**执行时间差异的原因：**
+
++ **无索引查询**同样使用了顺序扫描（`Seq Scan`），需要扫描整个 `lineitem` 表，查找与给定 `l_partkey` 匹配的记录。由于没有索引支持，这导致了较高的执行时间（236.661 ms）。
++ **有索引查询**使用了 `Bitmap Index Scan`，通过索引快速定位到符合条件的行，并使用 `Bitmap Heap Scan` 提取实际数据，显著提升了查询效率。由于索引加速了数据访问，查询时间减少到了 0.595 ms。
+
+##### 实验结论：
+
++ **无索引查询**由于必须执行全表扫描（`Seq Scan`），查询时间较长。
++ **有索引查询**使用了索引扫描（`Bitmap Index Scan`）来加速数据访问，减少了需要扫描的行数，从而显著缩短了执行时间。
++ 在这两个查询中，执行时间的差异主要是由是否存在合适的索引来决定的，索引能有效减少数据扫描的范围，提高查询效率。
+
+###### 结论
+
+在多表连接查询中，针对连接属性建立索引能够有效减少查询的时间开销，显著提升性能。
+
+---
+
+#### 3.3 索引对小表查询的作用
+
+##### 实验步骤
+
+1. 创建 `supplier` 表的不带主键索引的备份表 `supplier_new`。  
+2. 在 `supplier` 表的 `s_suppkey` 上创建索引。  
+3. 执行查询：  
+   - 不强制使用索引：查询是否会自动使用索引。  
+   - 强制使用索引：通过设置 `enable_seqscan=false` 禁用顺序扫描，强制使用索引进行查询。
+4. 比较两种查询的执行计划和执行时间。
+
+##### 实验代码
+
+###### 创建备份表
+
+```sql
+CREATE TABLE supplier_new AS TABLE supplier;
+```
+
+###### 不强制使用索引查询
+
+```sql
+EXPLAIN  
+SELECT s_suppkey  
+FROM supplier;
+```
+
+###### 强制使用索引查询
+
+```sql
+SET enable_seqscan = OFF;  
+EXPLAIN  
+SELECT s_suppkey  
+FROM supplier;
+```
+
+##### 执行计划
+
+###### 不强制使用索引查询
+
+```sql
+                         QUERY PLAN
+------------------------------------------------------------
+ Seq Scan on supplier  (cost=0.00..62.00 rows=2000 width=4)
+(1 row)
+```
+
+###### 强制使用索引查询
+
+```sql
+                                   QUERY PLAN
+--------------------------------------------------------------------------------
+ Bitmap Heap Scan on supplier  (cost=42.75..104.75 rows=2000 width=4)
+   ->  Bitmap Index Scan on supplier_pkey  (cost=0.00..42.25 rows=2000 width=0)
+(2 rows)
+```
+
+##### 结果分析
+
+###### **不强制使用索引时**：
+
++ 查询优化器决定不使用索引，而是执行全表扫描（`Seq Scan`）。
++ 这种情况通常发生在查询的结果集较大，或者索引无法有效过滤掉大量数据时。在这种情况下，执行全表扫描可能比使用索引更加高效。
+
+###### **强制使用索引时：**
+
++ 强制索引扫描后，查询计划显示使用了 `Bitmap Index Scan` 和 `Bitmap Heap Scan`。
++ 通过强制索引扫描，你迫使查询优化器使用索引，虽然在某些情况下这可能不是最优选择，因为索引扫描会涉及额外的成本（例如，在执行 `Bitmap Heap Scan` 时需要访问实际数据）。
+
+###### **对比和分析：**
+
++ **不强制使用索引时**，由于没有强制要求使用索引，优化器选择了全表扫描（`Seq Scan`），这通常发生在查询范围较大或索引不够有效时。
++ **强制使用索引时**，索引扫描虽然能提高定位的精确度，但在某些情况下，它的成本反而较高，因为查询需要额外的步骤（`Bitmap Heap Scan`）来访问数据。
+
+##### 结论
+
++ **索引不一定总是优于全表扫描**。查询优化器通常会根据查询的实际情况（如数据量、过滤条件等）选择最优的执行路径。
++ **强制使用索引**虽然能确保索引被使用，但在某些情况下，这可能反而导致较高的执行成本。因此，在实际使用中，应根据查询的特点来决定是否强制使用索引
+
+---
+
+#### 3.4 查询条件中函数对索引的影响
+
+##### 实验步骤
+
+1. 创建 `lineitem_new` 表，并在 `l_discount` 和 `l_quantity` 上分别创建索引。  
+2. 编写两条等价查询语句：  
+   - 一条在查询条件中使用函数。  
+   - 一条通过改写条件避免使用函数。
+3. 执行两条语句，比较其执行计划和执行时间。
+
+##### 实验代码
+
+###### 创建索引
+
+```sql
+CREATE INDEX lineitem_index1 ON lineitem_new(l_discount);
+CREATE INDEX lineitem_index2 ON lineitem_new(l_quantity);
+```
+
+###### 使用函数的查询
+
+```sql
+EXPLAIN  
+SELECT DISTINCT B.l_orderkey  
+FROM lineitem_new AS A, lineitem_new AS B  
+WHERE A.l_extendedprice = 16473.51  
+  AND A.l_discount = 0.04  
+  AND ABS(A.l_quantity - B.l_quantity) < 20;
+```
+
+###### 不使用函数的查询
+
+```sql
+EXPLAIN  
+SELECT DISTINCT B.l_orderkey  
+FROM lineitem_new AS A, lineitem_new AS B  
+WHERE A.l_extendedprice = 16473.51  
+  AND A.l_discount = 0.04  
+  AND B.l_quantity > A.l_quantity - 20  
+  AND B.l_quantity < A.l_quantity + 20;
+```
+
+##### 执行计划
+
+###### 使用函数的查询
+
+```sql
+                                             QUERY PLAN
+-----------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=1000002818715.57..1000002820813.88 rows=209831 width=4)
+   Group By Key: b.l_orderkey
+   ->  Nested Loop  (cost=10000001505.54..1000002817962.36 rows=301284 width=4)
+         Join Filter: (abs((a.l_quantity - b.l_quantity)) < 20::numeric)
+         ->  Bitmap Heap Scan on lineitem_new a  (cost=1505.54..21491.93 rows=1 width=5)
+               Recheck Cond: (l_discount = .04)
+               Filter: (l_extendedprice = 16473.51)
+               ->  Bitmap Index Scan on lineitem_index1  (cost=0.00..1505.54 rows=81226 width=0)
+                     Index Cond: (l_discount = .04)
+         ->  Seq Scan on lineitem_new b  (cost=10000000000.00..1000002780653.00 rows=903853 width=9)
+(10 rows)
+```
+
+###### 不使用函数的查询
+
+```sql
+                                                          QUERY PLAN
+-------------------------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=45661.59..46665.87 rows=100428 width=4)
+   Group By Key: b.l_orderkey
+   ->  Nested Loop  (cost=3643.29..45410.52 rows=100428 width=4)
+         ->  Bitmap Heap Scan on lineitem_new a  (cost=1505.54..21491.93 rows=1 width=5)
+               Recheck Cond: (l_discount = .04)
+               Filter: (l_extendedprice = 16473.51)
+               ->  Bitmap Index Scan on lineitem_index1  (cost=0.00..1505.54 rows=81226 width=0)
+                     Index Cond: (l_discount = .04)
+         ->  Bitmap Heap Scan on lineitem_new b  (cost=2137.74..22914.30 rows=100428 width=9)
+               Recheck Cond: ((l_quantity > (a.l_quantity - 20::numeric)) AND (l_quantity < (a.l_quantity + 20::numeric)))
+               ->  Bitmap Index Scan on lineitem_index2  (cost=0.00..2112.63 rows=100428 width=0)
+                     Index Cond: ((l_quantity > (a.l_quantity - 20::numeric)) AND (l_quantity < (a.l_quantity + 20::numeric)))
+(12 rows)
+```
+
+##### 结果分析
+
+###### **使用函数时的执行计划**
+
++ **执行方式**：
+  - 在 `WHERE` 子句中使用了 `abs(a.l_quantity - b.l_quantity) < 20` 函数。由于该函数的存在，查询优化器无法利用 `l_quantity` 上的索引来进行高效的查找。
+  - 在执行计划中，查询优化器选择了 `Seq Scan`，即全表扫描，针对 `lineitem_new` 表的 `b` 表进行扫描，而没有使用索引。这导致了查询性能的显著降低。
+  - 虽然在 `a` 表上能有效使用索引，但由于 `b` 表的查询条件包含了函数，导致不能有效利用索引，进而导致了全表扫描（`Seq Scan`）的使用。
+
+###### **不使用函数时的执行计划**
+
++ **执行方式**：
+  - 使用了 `BETWEEN a.l_quantity - 20 AND a.l_quantity + 20` 条件，而没有使用函数。这时，查询优化器能够利用 `l_quantity` 列上的索引（`lineitem_index2`），因为索引能够直接处理范围查询。
+  - 在执行计划中，查询优化器选择了 `Bitmap Index Scan`，并使用了 `Bitmap Heap Scan` 来根据索引定位数据，显著提升了查询性能。
+
+###### **性能差异的原因**
+
++ **使用函数的查询**：由于 `abs()` 函数的存在，查询优化器无法利用索引对 `l_quantity` 列进行高效的扫描，因此选择了全表扫描（`Seq Scan`）。
++ **不使用函数的查询**：查询条件可以直接通过索引扫描处理（`Bitmap Index Scan`），因此查询性能较好。
+
+##### 结论
+
++ 使用函数（如 `abs()`）会导致查询条件失效，优化器无法使用索引，最终可能选择全表扫描，从而导致性能下降。
++ 通过优化查询语句，避免在 `WHERE` 子句中使用函数，可以提高查询的性能，并使索引得以充分利用。
+
+---
+
+#### 3.5 多表嵌入式 SQL 查询
+
+##### 实验步骤
+
+1. 编写两条等价查询语句：  
+   - 一条使用嵌套查询。  
+   - 一条使用连接查询。
+2. 执行两条语句，比较其执行计划和执行时间。  
+3. 对实验结果进行分析，确定两种方法在性能上的差异。
+
+##### 实验代码
+
+###### 嵌套查询
+
+```sql
+EXPLAIN ANALYZE  
+SELECT A.p_name  
+FROM part AS A  
+WHERE A.p_partkey IN (  
+  SELECT B.ps_partkey  
+  FROM partsupp AS B  
+  WHERE B.ps_suppkey = 1002  
+);
+```
+
+###### 连接查询
+
+```sql
+EXPLAIN ANALYZE  
+SELECT A.p_name  
+FROM part AS A, partsupp AS B  
+WHERE B.ps_suppkey = 1002  
+  AND A.p_partkey = B.ps_partkey;
+```
+
+##### 执行计划
+
+###### 嵌套查询
+
+```sql
+                                                                 QUERY PLAN
+---------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop Semi Join  (cost=0.00..3273.74 rows=78 width=38) (actual time=0.042..41.381 rows=80 loops=1)
+   ->  Index Scan using part_pkey on part a  (cost=0.00..1903.25 rows=40000 width=42) (actual time=0.012..5.820 rows=40000 loops=1)
+   ->  Index Only Scan using partsupp_pkey on partsupp b  (cost=0.00..0.68 rows=21 width=4) (actual time=30.008..30.008 rows=80 loops=40000)
+         Index Cond: ((ps_partkey = a.p_partkey) AND (ps_suppkey = 1002))
+         Heap Fetches: 80
+ Total runtime: 41.493 ms
+(6 rows)
+```
+
+###### 连接查询
+
+```sql
+                                                                QUERY PLAN
+------------------------------------------------------------------------------------------------------------------------------------------
+ Nested Loop  (cost=0.00..3666.56 rows=78 width=38) (actual time=0.050..5.205 rows=80 loops=1)
+   ->  Index Only Scan using partsupp_pkey on partsupp b  (cost=0.00..3112.37 rows=78 width=4) (actual time=0.022..4.722 rows=80 loops=1)
+         Index Cond: (ps_suppkey = 1002)
+         Heap Fetches: 80
+   ->  Index Scan using part_pkey on part a  (cost=0.00..7.09 rows=1 width=42) (actual time=0.373..0.401 rows=80 loops=80)
+         Index Cond: (p_partkey = b.ps_partkey)
+ Total runtime: 5.314 ms
+(7 rows)
+```
+
+##### 结果分析
+
+######  查询执行计划对比
+
+**嵌套查询执行计划**
+
++ **执行计划分析**：
++ 在嵌套查询中，查询优化器执行了一个 **Nested Loop Semi Join**，即首先通过 `part` 表扫描（`Index Scan`），然后通过 `partsupp` 表对每个零件查询是否存在供应商 `ps_suppkey = 1002`。
++ `partsupp` 表的扫描是通过 **Index Only Scan** 来实现的，它直接利用了 `ps_partkey` 和 `ps_suppkey` 列的索引。每个 `part` 表中的条目都需要对 `partsupp` 表执行一次扫描，导致执行计划中有多次 `Heap Fetches`。
++ **性能瓶颈**：
++ 执行时间为 **41.493 ms**，嵌套查询使用了 `Index Only Scan` 和 `Heap Fetches`，导致对于每个 `part` 表的记录都需要查找对应的 `partsupp` 表记录，可能会导致较高的 I/O 开销。
+
+**连接查询执行计划**
+
++ **执行计划分析**：
++ 在连接查询中，查询优化器首先通过 `partsupp` 表上的索引（`Index Only Scan`）扫描所有供应商 `ps_suppkey = 1002` 的记录。
++ 然后，它通过 **Index Scan** 在 `part` 表中查找相应的零件 `p_partkey`。
++ 查询优化器使用了有效的索引扫描，没有出现额外的 `Heap Fetches`，因此查询速度较快。
++ **性能瓶颈**：
++ 执行时间为 **5.314 ms**，连接查询直接利用了索引，减少了额外的 I/O 开销，因此查询时间比嵌套查询要低得多。
+
+######  性能差异的原因
+
+**嵌套查询（Subquery）：**
+
++ **效率较低**：嵌套查询通常会对外层查询的每一行执行一次内层查询，因此在涉及到多个记录时，查询可能会变得非常低效。
++ **多次索引查找**：在执行嵌套查询时，`part` 表的每一条记录都需要访问 `partsupp` 表来查找是否存在符合条件的记录，这可能导致较高的 I/O 操作（即每次对 `partsupp` 表执行查找）。
+
+**连接查询（Join）：**
+
++ **更高效的索引使用**：连接查询通过索引扫描在 `partsupp` 和 `part` 表之间建立直接的连接，避免了对每一条记录都执行子查询。直接连接使得查询能够更有效地利用索引，减少了不必要的 I/O 操作。
++ **索引优化**：在连接查询中，使用了对 `ps_suppkey` 和 `p_partkey` 的索引，这样能够快速找到匹配的记录。
+
+##### 结论
+
++ 尽量避免使用嵌套查询，优先选择连接查询以提升查询性能。
+
+---
+
+#### 3.6 where 查询条件中复合查询条件 OR 对索引的影响
+
+##### 实验步骤
+
+1. 在 `lineitem_new` 表的 `l_quantity` 上创建索引。  
+2. 编写查询语句：  
+   - 一条使用 `OR` 条件。  
+   - 另一条将 `OR` 条件改写为两条查询通过 `UNION` 连接。
+3. 比较两种查询方式的执行计划和查询性能。
+
+##### 实验代码
+
+###### 创建索引
+
+```sql
+CREATE INDEX lineitem_index ON lineitem_new(l_quantity);
+```
+
+###### 含有 `OR` 的查询
+
+```sql
+EXPLAIN  
+SELECT *  
+FROM lineitem_new  
+WHERE l_tax = 0.06 AND (l_quantity = 36 OR l_discount = 0.09);
+```
+
+###### 改写为 `UNION` 的查询
+
+```sql
+EXPLAIN  
+(SELECT *  
+ FROM lineitem_new  
+ WHERE l_tax = 0.06 AND l_quantity = 36)  
+UNION  
+(SELECT *  
+ FROM lineitem_new  
+ WHERE l_tax = 0.06 AND l_discount = 0.09);
+```
+
+##### 执行计划
+
+###### 含有 `OR` 的查询
+
+```sql
+                                       QUERY PLAN
+----------------------------------------------------------------------------------------
+ Seq Scan on lineitem_new  (cost=10000000000.00..1000003458542.75 rows=10825 width=129)
+   Filter: ((l_tax = .06) AND ((l_quantity = 36::numeric) OR (l_discount = .09)))
+(2 rows)
+```
+
+###### 改写为 `UNION` 的查询
+
+```sql
+                                                                                                                         QUERY PLAN
+
+
+------------------------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=1000003253050.43..1000003253160.49 rows=11006 width=129)
+   Group By Key: public.lineitem_new.l_orderkey, public.lineitem_new.l_partkey, public.lineitem_new.l_suppkey, public.lineitem_new.l_linenumber,
+ public.lineitem_new.l_quantity, public.lineitem_new.l_extendedprice, public.lineitem_new.l_discount, public.lineitem_new.l_tax, public.lineitem
+_new.l_returnflag, public.lineitem_new.l_linestatus, public.lineitem_new.l_shipdate, public.lineitem_new.l_commitdate, public.lineitem_new.l_rec
+eiptdate, public.lineitem_new.l_shipinstruct, public.lineitem_new.l_shipmode, public.lineitem_new.l_comment
+   ->  Append  (cost=341.10..1000003252610.19 rows=11006 width=129)
+         ->  Bitmap Heap Scan on lineitem_new  (cost=341.10..19920.63 rows=2010 width=129)
+               Recheck Cond: (l_quantity = 36::numeric)
+               Filter: (l_tax = .06)
+               ->  Bitmap Index Scan on lineitem_index  (cost=0.00..340.60 rows=18167 width=0)
+                     Index Cond: (l_quantity = 36::numeric)
+         ->  Seq Scan on lineitem_new  (cost=10000000000.00..1000003232579.50 rows=8996 width=129)
+               Filter: ((l_tax = .06) AND (l_discount = .09))
+(10 rows)
+```
+
+##### 结果分析
+
+###### 含有 OR 的查询
+
++ **执行计划分析：**
+  - **Seq Scan**：查询计划显示，尽管有条件 `l_quantity = 36` 和 `l_discount = 0.09`，但由于包含了 `OR`，查询执行计划选择了顺序扫描（`Seq Scan`），而没有利用任何索引。
+  - **原因**：由于 `OR` 条件可能导致查询无法利用现有的单列索引。如果某个条件（如 `l_quantity = 36`）可以使用索引，而另一个条件（如 `l_discount = 0.09`）不能，则数据库通常会选择顺序扫描（`Seq Scan`），因为 `OR` 会使得查询的两部分条件被独立地处理，从而无法利用一个单一的索引。
+
+###### **使用 UNION 的查询  **
+
++ **执行计划分析：**
+  - **第一个子查询**利用了 `Bitmap Heap Scan` 和 `Bitmap Index Scan`，能够有效地利用索引（`l_quantity = 36`）。
+  - **第二个子查询**则是对 `l_discount = 0.09` 进行了顺序扫描（`Seq Scan`），因为 `l_discount` 可能没有索引或者索引的使用不如 `l_quantity` 高效。
+
+###### **性能差异**：
+
++ **原始查询（含 OR 条件）**：
++ 由于 OR 条件可能导致查询无法有效使用索引，查询会执行顺序扫描（`Seq Scan`），这会导致性能较差，尤其是在数据量较大时。
++ **改写为 UNION 的查询**：
++ 将查询拆成两个独立的查询，可以分别利用不同的条件（`l_quantity` 和 `l_discount`）来使用索引，从而提高查询效率。尤其是对于 `l_quantity` 使用了索引，查询的执行会显著加速。
++ 通过 `UNION` 合并结果，可以避免对 `OR` 条件的处理，使得每个查询都能利用其特定的索引。
+
+##### 结论
+
++ **含 OR 的查询**：由于包含 OR 条件，查询计划可能会选择顺序扫描（`Seq Scan`），不能有效利用索引，从而导致性能较差。
++ **使用 UNION 的查询**：将查询拆分为两个子查询并通过 UNION 合并，每个查询都能分别利用适当的索引，从而提高了查询效率。
+
+---
+
+#### 3.7 聚集运算中的索引设计
+
+##### 实验步骤
+
+1. 在 `lineitem_new` 表上创建适合分组和聚集操作的索引：  
+   - 针对 `GROUP BY` 的分组属性建立索引。  
+   - 针对聚集运算的属性建立索引。
+2. 分别在无索引表和有索引表上执行相同的查询。  
+3. 强制使用索引后再次执行查询，观察性能变化。
+
+##### 实验代码
+
+###### 创建索引
+
+```sql
+CREATE INDEX lineitem_index1 ON lineitem_new(l_extendedprice);
+CREATE INDEX lineitem_index2 ON lineitem_new(l_suppkey);
+```
+
+###### 无索引查询
+
+```sql
+EXPLAIN  
+SELECT l_suppkey, AVG(l_extendedprice) AS avg_price  
+FROM lineitem  
+GROUP BY l_suppkey;
+```
+
+###### 有索引查询
+
+```sql
+EXPLAIN  
+SELECT l_suppkey, AVG(l_extendedprice) AS avg_price  
+FROM lineitem_new  
+GROUP BY l_suppkey;
+```
+
+###### 强制使用索引查询
+
+```sql
+SET enable_seqscan = OFF;  
+EXPLAIN  
+SELECT l_suppkey, AVG(l_extendedprice) AS avg_price  
+FROM lineitem_new  
+GROUP BY l_suppkey;
+```
+
+##### 执行计划
+
+###### 无索引查询
+
+```sql
+                               QUERY PLAN
+-------------------------------------------------------------------------
+ HashAggregate  (cost=100005.36..100030.36 rows=2000 width=44)
+   Group By Key: l_suppkey
+   ->  Seq Scan on lineitem  (cost=0.00..94811.24 rows=1038824 width=12)
+(3 rows)
+```
+
+###### 有索引查询
+
+```sql
+                                 QUERY PLAN
+----------------------------------------------------------------------------
+ HashAggregate  (cost=32325.79..32350.79 rows=2000 width=44)
+   Group By Key: l_suppkey
+   ->  Seq Scan on lineitem_new  (cost=0.00..27806.53 rows=903853 width=12)
+(3 rows)
+```
+
+###### 强制使用索引查询
+
+```sql
+                                             QUERY PLAN
+-----------------------------------------------------------------------------------------------------
+ GroupAggregate  (cost=0.00..892878.29 rows=2000 width=44)
+   Group By Key: l_suppkey
+   ->  Index Scan using lineitem_index2 on lineitem_new  (cost=0.00..888334.02 rows=903853 width=12)
+(3 rows)
+```
+
+##### 结果分析
+
+###### 无索引查询
+
++ **执行计划分析**：
+  - **Seq Scan**：查询计划显示，数据库执行顺序扫描（`Seq Scan`）来处理 `lineitem` 表，因为没有合适的索引来优化分组操作。扫描表中的所有数据，计算每个供应商的平均价格。
+  - **HashAggregate**：由于没有索引，数据库使用了哈希聚合（`HashAggregate`）来按 `l_suppkey` 进行分组并计算平均值。
+  - 执行时间：由于没有索引，扫描整个表需要较长的时间，尤其是表数据量较大时。
+
+###### 有索引查询
+
++ **执行计划分析**：
+  - **Seq Scan**：即使我们创建了索引，查询仍然使用了顺序扫描（`Seq Scan`）。虽然 `l_suppkey` 有索引，但是在这种情况下数据库可能认为顺序扫描更高效，因为它可能需要读取整个表的数据来进行聚合操作，特别是当表中的数据量较大时，索引可能没有明显的优势。
+  - **HashAggregate**：数据库仍然使用了哈希聚合（`HashAggregate`）来按 `l_suppkey` 分组并计算平均值。即使有索引，数据库并没有选择使用索引扫描（`Index Scan`）来代替顺序扫描。
+
+###### 强制使用索引查询
+
++ **执行计划分析**：
+  - **Index Scan**：由于强制启用索引扫描，数据库选择了使用 `lineitem_index2` 索引来扫描 `lineitem_new` 表。通过索引扫描，可以有效地按 `l_suppkey` 进行分组，避免了顺序扫描（`Seq Scan`）带来的性能损失。
+  - **GroupAggregate**：与无索引查询类似，数据库使用哈希聚合来按 `l_suppkey` 进行分组并计算平均值，但索引扫描提供了更高效的数据访问方式。
+  - 执行时间：强制使用索引通常会提升查询性能，尤其是当表中有大量数据时。
+
+###### 对比执行计划：
+
+| 查询类型             | 执行计划                             | 说明                                                         |
+| -------------------- | ------------------------------------ | ------------------------------------------------------------ |
+| **无索引查询**       | `Seq Scan`<br/> + `HashAggregate`    | 执行顺序扫描，按 `l_suppkey`<br/> 进行哈希聚合。数据量大时性能差。 |
+| **有索引查询**       | `Seq Scan`<br/> + `HashAggregate`    | 即使有索引，数据库选择了顺序扫描，可能因为需要对整个表进行聚合。 |
+| **强制使用索引查询** | `Index Scan`<br/> + `GroupAggregate` | 强制使用索引扫描，避免顺序扫描，能够更高效地利用索引。       |
+
+
++ **执行速度对比：**
+  - **无索引查询**：由于没有索引，查询性能较差，尤其是当表数据量较大时，顺序扫描会导致性能瓶颈。
+  - **有索引查询**：虽然创建了索引，数据库仍然选择顺序扫描，导致性能没有显著提升。
+  - **强制使用索引查询**：通过强制使用索引扫描，查询性能得到明显提升。索引帮助避免了顺序扫描，从而加速了查询。
+
+##### 结论
+
++ **无索引查询**：由于没有索引，数据库需要扫描整个表来执行聚合操作，性能较差，特别是在数据量大时。
++ **有索引查询**：即使创建了索引，如果查询条件没有完全匹配索引或数据库认为顺序扫描更高效，查询可能仍然会执行顺序扫描，导致性能没有提升。
++ **强制使用索引查询**：强制启用索引扫描通常会提高查询效率，尤其是在大表聚合时，通过索引扫描能够避免顺序扫描带来的性能损失。
+
+---
+
+#### 3.8 Select 子句中有无 distinct 的区别
+
+##### 实验步骤
+
+1. 编写两条查询语句：  
+   - 一条不使用 `DISTINCT`。  
+   - 一条使用 `DISTINCT`。
+2. 比较两种方式的执行计划和查询效率。
+
+##### 实验代码
+
+###### 无 `DISTINCT` 查询
+
+```sql
+EXPLAIN ANALYZE  
+SELECT o_orderkey  
+FROM orders  
+WHERE o_orderstatus = 'O'  
+  AND o_orderpriority = '4-NOT SPECIFIED';
+```
+
+###### 有 `DISTINCT` 查询
+
+```sql
+EXPLAIN ANALYZE  
+SELECT DISTINCT o_orderkey  
+FROM orders  
+WHERE o_orderstatus = 'O'  
+  AND o_orderpriority = '4-NOT SPECIFIED';
+```
+
+##### 执行计划
+
+###### 无 `DISTINCT` 查询
+
+```sql
+                                                          QUERY PLAN
+-------------------------------------------------------------------------------------------------------------------------------
+ Seq Scan on orders  (cost=10000000000.00..1000000878600.00 rows=29224 width=4) (actual time=0.072..46.682 rows=29224 loops=1)
+   Filter: ((o_orderstatus = 'O'::bpchar) AND (o_orderpriority = '4-NOT SPECIFIED'::bpchar))
+   Rows Removed by Filter: 270777
+ Total runtime: 48.135 ms
+(4 rows)
+```
+
+###### 有 `DISTINCT` 查询
+
+```sql
+                                                               QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------------------------------
+ Unique  (cost=0.00..13670.34 rows=29224 width=4) (actual time=47.678..112.071 rows=29224 loops=1)
+   ->  Index Scan using orders_pkey on orders  (cost=0.00..13597.28 rows=29224 width=4) (actual time=47.673..108.759 rows=29224 loops=1)
+         Filter: ((o_orderstatus = 'O'::bpchar) AND (o_orderpriority = '4-NOT SPECIFIED'::bpchar))
+         Rows Removed by Filter: 270777
+ Total runtime: 113.043 ms
+(5 rows)
+```
+
+##### 结果分析
+
+###### 无 `DISTINCT` 查询
+
++ **执行计划分析**：
+  - **Seq Scan**：查询执行计划显示，数据库对 `orders` 表进行了顺序扫描（`Seq Scan`）。这是因为没有索引可以有效地用于 `o_orderstatus` 和 `o_orderpriority` 的过滤条件，或者数据库评估认为顺序扫描在此情况下更为高效。
+  - **Filter**：使用了过滤条件 `o_orderstatus = 'O'` 和 `o_orderpriority = '4-NOT SPECIFIED'` 来筛选符合条件的记录。
+  - **Rows Removed by Filter**：从原始数据集中，过滤掉了 270,777 条不符合条件的记录。
++ **执行时间**：查询扫描整个表并筛选符合条件的记录，执行时间为 48.135 毫秒。
+
+###### 有 `DISTINCT` 查询
+
++ **执行计划分析**：
+  - **Unique**：查询计划中使用了 `Unique` 操作符，这是因为 `DISTINCT` 需要确保结果中没有重复的记录，因此会进行额外的去重操作。
+  - **Index Scan**：数据库选择了使用 `orders_pkey` 索引进行扫描。与无 `DISTINCT` 查询相比，查询计划使用了索引扫描（`Index Scan`），这通常比顺序扫描更高效，尤其是对于带有条件过滤的查询。
+  - **Filter**：使用了和之前相同的过滤条件 `o_orderstatus = 'O'` 和 `o_orderpriority = '4-NOT SPECIFIED'`。
+  - **Rows Removed by Filter**：过滤掉了 270,777 条不符合条件的记录。
++ **执行时间**：尽管使用了索引扫描，但 `DISTINCT` 操作导致查询的执行时间较长，达到了 113.043 毫秒。去重操作消耗了更多时间。
+
+######  对比执行计划
+
+| 查询类型             | 执行计划                                     | 说明                                                         |
+| -------------------- | -------------------------------------------- | ------------------------------------------------------------ |
+| **无 DISTINCT 查询** | `Seq Scan`<br/> + `Filter`                   | 使用顺序扫描处理表，过滤符合条件的记录。没有去重操作。       |
+| **有 DISTINCT 查询** | `Index Scan`<br/> + `Unique`<br/> + `Filter` | 使用索引扫描，额外进行去重操作（`Unique`<br/>）。执行时间更长。 |
+
+
++ **执行时间对比**
+  - **无 DISTINCT 查询**：使用顺序扫描，执行时间为 48.135 毫秒。没有去重操作，所以相对较快。
+  - **有 DISTINCT 查询**：使用索引扫描，但增加了去重操作（`DISTINCT`），执行时间为 113.043 毫秒。去重操作导致查询时间大大增加，尽管索引扫描本身通常较快，但 `DISTINCT` 操作增加了额外的开销。
+
+##### 结论
+
++ **无 DISTINCT 查询**：由于没有去重操作，查询执行时间较短，适合在无需去重的场合使用。
++ **有 DISTINCT 查询**：使用 `DISTINCT` 会导致查询执行时间显著增加，尤其是当去重操作需要额外的排序或去重步骤时。在某些情况下，尽管有索引扫描，但去重操作的额外开销使得整体查询效率较低。
+
+---
+
+#### 3.9 union、union all 的区别
+
+##### 实验步骤
+
+1. 编写两条查询语句：  
+   - 一条使用 `UNION`。  
+   - 一条使用 `UNION ALL`。
+2. 比较两种方式的查询结果和执行性能。
+
+##### 实验代码
+
+###### 使用 `UNION` 查询
+
+```sql
+EXPLAIN ANALYZE  
+SELECT p_partkey FROM part  
+UNION  
+SELECT ps_partkey FROM partsupp;
+```
+
+###### 使用 `UNION ALL` 查询
+
+```sql
+EXPLAIN ANALYZE  
+SELECT p_partkey FROM part  
+UNION ALL  
+SELECT ps_partkey FROM partsupp;
+```
+
+##### 执行计划
+
+###### 使用 `UNION` 查询
+
+```sql
+                                                                  QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=12112.52..14112.52 rows=200000 width=4) (actual time=191.195..194.706 rows=40000 loops=1)
+   Group By Key: part.p_partkey
+   ->  Append  (cost=0.00..11612.52 rows=200000 width=4) (actual time=0.150..170.226 rows=200004 loops=1)
+         ->  Index Only Scan using part_pkey on part  (cost=0.00..1903.25 rows=40000 width=4) (actual time=0.148..8.650 rows=40000 loops=1)
+               Heap Fetches: 40000
+         ->  Bitmap Heap Scan on partsupp  (cost=2612.27..7709.27 rows=160000 width=4) (actual time=4.239..152.128 rows=160004 loops=1)
+               ->  Bitmap Index Scan on partsupp_pkey  (cost=0.00..2572.27 rows=160000 width=0) (actual time=3.947..3.947 rows=160004 loops=1)
+ Total runtime: 196.416 ms
+(8 rows)
+```
+
+###### 使用 `UNION ALL` 查询
+
+```sql
+                                                                  QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------------------------------------
+ Result  (cost=0.00..9612.52 rows=200000 width=4) (actual time=0.041..45.067 rows=200004 loops=1)
+   ->  Append  (cost=0.00..9612.52 rows=200000 width=4) (actual time=0.039..34.400 rows=200004 loops=1)
+         ->  Index Only Scan using part_pkey on part  (cost=0.00..1903.25 rows=40000 width=4) (actual time=0.038..5.956 rows=40000 loops=1)
+               Heap Fetches: 40000
+         ->  Bitmap Heap Scan on partsupp  (cost=2612.27..7709.27 rows=160000 width=4) (actual time=3.232..19.204 rows=160004 loops=1)
+               ->  Bitmap Index Scan on partsupp_pkey  (cost=0.00..2572.27 rows=160000 width=0) (actual time=2.945..2.945 rows=160004 loops=1)
+ Total runtime: 50.268 ms
+(7 rows)
+```
+
+##### 结果分析
+
+###### 使用 `UNION` 查询
+
++ **执行计划分析**：
+  - **HashAggregate**：`UNION` 会去除重复的记录，因此执行计划中使用了 `HashAggregate` 来进行去重操作。
+  - **Append**：执行计划中使用了 `Append`，将两个子查询的结果合并。
+  - **Index Only Scan**：`part` 表使用了索引扫描。
+  - **Bitmap Heap Scan**：`partsupp` 表使用了位图堆扫描，首先通过索引扫描找到符合条件的记录。
+  - **Total runtime**：执行时间为 196.416 毫秒。
++ **执行计划和效率分析：**
+  - `UNION` 操作会去除重复的记录，因此需要额外的去重步骤（`HashAggregate`）。去重操作增加了额外的开销，因此查询执行时间较长。
+
+###### 使用 `UNION ALL` 查询
+
++ **执行计划分析**：
+  - **Result**：`UNION ALL` 没有进行去重，因此只使用了 `Result` 操作来合并两个子查询的结果。
+  - **Append**：同样使用了 `Append` 操作来合并两个子查询的结果。
+  - **Index Only Scan**：`part` 表使用了索引扫描。
+  - **Bitmap Heap Scan**：`partsupp` 表使用了位图堆扫描，首先通过索引扫描找到符合条件的记录。
+  - **Total runtime**：执行时间为 50.268 毫秒。
++ **执行计划和效率分析：**
+  - `UNION ALL` 不进行去重操作，因此没有 `HashAggregate` 步骤，执行效率较高。只需要合并两个查询的结果，减少了去重带来的开销，因此执行时间显著低于 `UNION`。
+
+###### 执行计划对比
+
+| 查询类型           | 执行计划                                                 | 执行时间   | 说明                                           |
+| ------------------ | -------------------------------------------------------- | ---------- | ---------------------------------------------- |
+| **UNION 查询**     | `HashAggregate`<br/> + `Append`<br/> + `Index Only Scan` | 196.416 ms | 需要去重操作，增加了额外的开销，执行时间较长。 |
+| **UNION ALL 查询** | `Result`<br/> + `Append`<br/> + `Index Only Scan`        | 50.268 ms  | 不进行去重操作，执行时间较短。                 |
+
+
++ **执行时间对比：**
+  - **UNION 查询**：执行时间较长，主要因为它需要进行去重（`HashAggregate`）。虽然在两个表的查询结果中可能有重复的 `p_partkey`，但去重操作的增加了额外的计算开销。
+  - **UNION ALL 查询**：执行时间较短，因为它不进行去重操作，直接将两个查询的结果合并，减少了计算量。
+
+##### 结论
+
++ **UNION**：适用于需要去重的场景，但由于去重操作带来的额外计算开销，会导致执行时间更长。
++ **UNION ALL**：适用于无需去重的场景，因为它跳过了去重步骤，通常执行速度更快。
+
+---
+
+#### 3.10 from 中存在多余的关系表，即查询非最简化
+
+##### 实验步骤
+
+1. 编写两条等价查询语句：  
+   - 一条在 `FROM` 子句中加入多余的关系表，并在 `WHERE` 子句中增加对应的连接条件。  
+   - 一条移除多余的关系表。
+2. 执行查询并比较两种方式的执行计划和性能。
+
+##### 实验代码
+
+###### 无多余关系表
+
+```sql
+EXPLAIN ANALYZE  
+SELECT DISTINCT orders.o_custkey  
+FROM lineitem, orders  
+WHERE lineitem.l_orderkey = orders.o_orderkey;
+```
+
+###### 有多余关系表
+
+```sql
+EXPLAIN ANALYZE  
+SELECT DISTINCT orders.o_custkey  
+FROM lineitem, orders, part  
+WHERE lineitem.l_orderkey = orders.o_orderkey  
+  AND lineitem.l_partkey = part.p_partkey;
+```
+
+##### 执行计划
+
+###### 无多余关系表
+
+```sql
+                                                                        QUERY PLAN
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=96807.84..96991.50 rows=18366 width=4) (actual time=358.020..359.230 rows=19998 loops=1)
+   Group By Key: orders.o_custkey
+   ->  Merge Join  (cost=1.16..94210.78 rows=1038824 width=4) (actual time=0.050..271.497 rows=903853 loops=1)
+         Merge Cond: (orders.o_orderkey = lineitem.l_orderkey)
+         ->  Index Scan using orders_pkey on orders  (cost=0.00..12097.28 rows=300000 width=8) (actual time=0.010..53.182 rows=300001 loops=1)
+         ->  Index Only Scan using lineitem_pkey on lineitem  (cost=0.00..68379.14 rows=1038824 width=4) (actual time=0.034..114.542 rows=903853 loops=1)
+               Heap Fetches: 0
+ Total runtime: 360.127 ms
+(8 rows)
+```
+
+###### 有多余关系表
+
+```sql
+                                                              QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------------------------
+ HashAggregate  (cost=138763.96..138947.62 rows=18366 width=4) (actual time=684.124..685.281 rows=19998 loops=1)
+   Group By Key: orders.o_custkey
+   ->  Hash Join  (cost=12788.00..136166.90 rows=1038824 width=4) (actual time=129.458..595.131 rows=903853 loops=1)
+         Hash Cond: (lineitem.l_partkey = part.p_partkey)
+         ->  Hash Join  (cost=11036.00..120131.07 rows=1038824 width=8) (actual time=117.737..455.655 rows=903853 loops=1)
+               Hash Cond: (lineitem.l_orderkey = orders.o_orderkey)
+               ->  Seq Scan on lineitem  (cost=0.00..94811.24 rows=1038824 width=8) (actual time=53.132..234.957 rows=903853 loops=1)
+               ->  Hash  (cost=7286.00..7286.00 rows=300000 width=8) (actual time=63.706..63.706 rows=300001 loops=1)
+                      Buckets: 524288  Batches: 1  Memory Usage: 11719kB
+                     ->  Seq Scan on orders  (cost=0.00..7286.00 rows=300000 width=8) (actual time=0.003..33.202 rows=300001 loops=1)
+         ->  Hash  (cost=1252.00..1252.00 rows=40000 width=4) (actual time=11.320..11.320 rows=40000 loops=1)
+                Buckets: 65536  Batches: 1  Memory Usage: 1407kB
+               ->  Seq Scan on part  (cost=0.00..1252.00 rows=40000 width=4) (actual time=0.012..6.847 rows=40000 loops=1)
+ Total runtime: 686.363 ms
+(14 rows)
+```
+
+##### 结果分析
+
+###### 无多余关系表
+
++ **执行计划分析：**
+  - **Merge Join**：使用了 `Merge Join` 对 `orders` 和 `lineitem` 表进行连接。
+  - **Index Scan** 和 **Index Only Scan**：对 `orders` 表和 `lineitem` 表都使用了索引扫描。
+  - **Total runtime**：执行时间为 360.127 毫秒。
+
+###### 有多余关系表
+
++ **执行计划分析：**
+  - **Hash Join**：两个 `Hash Join` 操作。首先是将 `lineitem` 和 `orders` 表进行哈希连接，然后再将 `lineitem` 和 `part` 表进行哈希连接。
+  - **Seq Scan**：对 `orders`、`lineitem` 和 `part` 表进行顺序扫描。
+  - **Total runtime**：执行时间为 686.363 毫秒。
+
+###### 执行结果和时间对比
+
+| 查询类型                 | 执行计划                                  | 执行时间   | 说明                                                     |
+| ------------------------ | ----------------------------------------- | ---------- | -------------------------------------------------------- |
+| **查询 1**（多余关系表） | 使用了多个 `Hash Join`<br/> 和 `Seq Scan` | 686.363 ms | 增加了多余的 `part`<br/> 表，导致查询变慢。              |
+| **查询 2**（最简化查询） | 使用了 `Merge Join`<br/> 和 `Index Scan`  | 360.127 ms | 仅连接了 `orders`<br/> 和 `lineitem`<br/> 表，查询更快。 |
+
+
++ **执行时间对比**：
+  - **查询 1**（多余关系表）：由于增加了 `part` 表，查询中执行了更多的连接操作（两个 `Hash Join`），导致查询时间显著增加。总执行时间为 686.363 毫秒。
+  - **查询 2**（最简化查询）：仅连接了 `orders` 和 `lineitem` 表，查询执行更高效。总执行时间为 360.127 毫秒。
++ **执行计划对比**：
+  - **查询 1** 使用了多余的 `part` 表，导致执行计划中增加了两个 `Hash Join` 操作。这不仅增加了计算开销，还导致了更多的数据处理。
+  - **查询 2** 使用了 `Merge Join`，这是连接两个表时更高效的方式，特别是当两个表的连接条件有索引时，`Merge Join` 通常比 `Hash Join` 更快速。
+
+##### 结论
+
++ **多余关系表的影响**：
+  - 增加不必要的表会导致更多的连接操作，这增加了执行计划的复杂性，特别是当这些表需要通过 `Hash Join` 或 `Merge Join` 进行连接时，计算量显著增加。
+  - 在执行计划中，使用更多的表和更复杂的连接操作会增加查询的执行时间。
++ **最简化查询的优势**：
+  - 最简化的查询只连接了必要的表，执行计划简单，使用了高效的 `Merge Join`，因此查询速度较快。
+
+## 7 数据库事务管理
+
+### 单事务/串行事务执行原子性保障机制验证
+
+建立用于实验的表的拷贝（对于前两句语句，建立完表`partsupp_1`后，将`partsupp_1`改为`partsupp_2`建立另一个表）：
+
+```mysql
+CREATE TABLE partsupp_1(
+    PS_PARTKEY integer NOT NULL,
+    PS_SUPPKEY integer NOT NULL,
+    PS_AVAILQTY integer NOT NULL,
+    PS_SUPPLYCOST decimal(15, 2) NOT NULL,
+    PS_COMMENT varchar(199) NOT NULL
+);
+
+## 插入数据
+insert into partsupp_1
+select *
+from partsupp;
+
+## 添加约束(用于实验)
+alter table partsupp_1 add constraint partsupp_chk_1 check(PS_SUPPKEY >= 0);
+alter table partsupp_2 add constraint partsupp_chk_2 check(PS_SUPPKEY >= 0);
+```
+
+查看实验操作前表中的数据：
+
+```mysql
+select count(*)
+from partsupp_1
+where PS_SUPPKEY < 10;
+```
+
+![屏幕截图 2024-12-26 223252](assets/屏幕截图 2024-12-26 2232522.png)
+
+```mysql
+select count(*)
+from partsupp_2
+where PS_SUPPKEY < 10;
+```
+
+![屏幕截图 2024-12-26 224943](assets/屏幕截图 2024-12-26 224943.png)
+
+#### 单一事务执行`update`操作
+
+在单一事务里运行一条语句：
+
+```mysql
+START TRANSACTION;
+
+update partsupp_2
+set PS_SUPPKEY = PS_SUPPKEY - 10;
+
+END;
+```
+
+该更新将导致部分元组属性`PS_SUPPKEY`的值小于`0`，不满足约束，运行后事务回滚：
+
+![屏幕截图 2024-12-26 234115](assets/屏幕截图 2024-12-26 234115.png)
+
+经过尝试，即使将最后一句`END`更换为`COMMIT`，最终事务也会回滚.
+
+若更新满足约束，则事务可以正常提交：
+
+```mysql
+START TRANSACTION;
+
+update partsupp_2
+set PS_SUPPKEY = PS_SUPPKEY + 5;
+
+COMMIT;
+```
+
+![屏幕截图 2024-12-26 234451](assets/屏幕截图 2024-12-26 234451.png)
+
+#### 事务内部单条语句失败对事务的整体影响
+
+**不将指令放在一个事务里顺序执行：**这样其实是串行地执行了两个事务.
+
+指令1：
+
+```mysql
+update partsupp_1
+set PS_SUPPKEY = PS_SUPPKEY - 10;
+```
+
+不满足约束，报错：
+
+![image-20241226223108649](assets/image-20241226223108649.png)
+
+指令2：
+
+```mysql
+update partsupp_1
+set PS_SUPPKEY = PS_SUPPKEY + 5;
+```
+
+执行成功.
+
+运行后查询：
+
+```mysql
+select count(*)
+from partsupp_1
+where PS_SUPPKEY < 10;
+```
+
+![屏幕截图 2024-12-26 223358](assets/屏幕截图 2024-12-26 223358.png)
+
+满足查询条件的元组数量发生变化，说明在上面的语句运行失败的情况下，下面的语句正常执行（两者相互独立）.
+
+**将指令放在同一个事务里执行：**
+
+```mysql
+START TRANSACTION;
+
+update partsupp_2
+set PS_SUPPKEY = PS_SUPPKEY - 10;
+
+update partsupp_2
+set PS_SUPPKEY = PS_SUPPKEY + 5;
+
+END;
+```
+
+第二句语句不满足约束，事务结束后自动回滚：
+
+![屏幕截图 2024-12-26 224022](assets/屏幕截图 2024-12-26 224022.png)
+
+运行后查询：
+
+```mysql
+select count(*)
+from partsupp_2
+where PS_SUPPKEY < 10;
+```
+
+![屏幕截图 2024-12-26 225028](assets/屏幕截图 2024-12-26 225028.png)
+
+满足查询条件的元组数量没有变化，说明事务中的两句语句都没有执行，这保证了事务的原子性，即事务内的操作要么完全运行，要么完全不运行.
+
+#### 利用保存点回滚事务
+
+`openGauss`中的保存点类似在事务内的检查点，使用保存点可以实现事务回滚到保存点位置，而非直接回滚整个事务.
+
+以下代码在保存点前插入一条元组，又在保存点后将这条元组删除，运行回滚到保存点的语句后提交事务：
+
+```mysql
+START TRANSACTION;
+
+INSERT INTO partsupp_1
+values(2022, 2022, 7, 0, 'comment');
+
+savepoint sp;
+
+delete from partsupp_1
+where PS_PARTKEY = '2022' and PS_SUPPKEY = '2022';
+
+rollback to sp;
+
+COMMIT;
+```
+
+运行前查询：
+
+```mysql
+select count(*)
+from partsupp_1;
+```
+
+![屏幕截图 2024-12-27 014958](assets/屏幕截图 2024-12-27 014958.png)
+
+在将要运行的事务代码中插入查询语句，观察表的变化：
+
+```mysql
+START TRANSACTION;
+
+INSERT INTO partsupp_1
+values(2022, 2022, 7, 0, 'comment');
+
+savepoint sp;
+
+select count(*)
+from partsupp_1;
+```
+
+![屏幕截图 2024-12-27 015249](assets/屏幕截图 2024-12-27 015249.png)
+
+这说明新的元组插入成功.
+
+```mysql
+delete from partsupp_1
+where PS_PARTKEY = '2022' and PS_SUPPKEY = '2022';
+
+select count(*)
+from partsupp_1;
+```
+
+![屏幕截图 2024-12-27 015409](assets/屏幕截图 2024-12-27 015409.png)
+
+这说明在事务内将新插入的元组删除成功.
+
+```mysql
+rollback to sp;
+
+COMMIT;
+
+select count(*)
+from partsupp_1;
+```
+
+![屏幕截图 2024-12-27 015546](assets/屏幕截图 2024-12-27 015546.png)
+
+这说明使用保存点实现了事务的部分回滚，撤销了删除操作，没有撤销插入操作.
+
+### 事务并发执行时的独立性保障机制验证
+
+打开两个终端，连接相同的数据库.
+
+实验前查询用于实验的元组的值：
+
+```mysql
+select PS_PARTKEY, PS_SUPPKEY, PS_AVAILQTY
+from partsupp_1
+where PS_PARTKEY = '2022' and PS_SUPPKEY = '2022';
+```
+
+![屏幕截图 2024-12-27 024807](assets/屏幕截图 2024-12-27 024807.png)
+
+两终端显示相同查询结果.
+
+#### `read committed`隔离级别下的脏读、不可重复读、幻读
+
+分别在两个窗口创建`read committed`隔离级别下的事务`T1`和`T2`：
+
+```mysql
+START TRANSACTION ISOLATION LEVEL read committed;
+```
+
+在事务`T1`中将上述元组的`PS_AVAILQTY`值修改为`1`，但不提交，在事务`T2`中查询上述元组的值：
+
+```mysql
+# T1
+update partsupp_1
+set PS_AVAILQTY = 1
+where PS_PARTKEY = '2022' and PS_SUPPKEY = '2022';
+```
+
+```mysql
+# T2
+select PS_AVAILQTY
+from partsupp_1
+where PS_PARTKEY = '2022' and PS_SUPPKEY = '2022';
+```
+
+![屏幕截图 2024-12-27 025400](assets/屏幕截图 2024-12-27 025400.png)
+
+事务`T2`读取到的不是事务`T1`未提交的值，这说明在`read committed`隔离级别下，`T2`没有读取到脏数据.
+
+将事务`T1`提交，再在事务`T2`中查询上述元组的值：
+
+```mysql
+# T1
+COMMIT;
+```
+
+```mysql
+# T2
+select PS_AVAILQTY
+from partsupp_1
+where PS_PARTKEY = '2022' and PS_SUPPKEY = '2022';
+```
+
+![屏幕截图 2024-12-27 025813](assets/屏幕截图 2024-12-27 025813.png)
+
+事务`T2`中出现了连续两次相同查询结果不同的现象，这说明在`read committed`隔离级别下可能出现不可重复读.
+
+在第一个窗口再次创建`read committed`隔离级别下的事务`T3`，在`T3`中删除上述元组并提交，在事务`T2`中查询上述元组的值：
+
+```mysql
+# T3
+delete from partsupp_1
+where PS_PARTKEY = '2022' and PS_SUPPKEY = '2022';
+```
+
+```mysql
+# T2
+select PS_AVAILQTY
+from partsupp_1
+where PS_PARTKEY = '2022' and PS_SUPPKEY = '2022';
+```
+
+![屏幕截图 2024-12-27 030523](assets/屏幕截图 2024-12-27 030523.png)
+
+事务`T2`此时查不到原有的元组了，这说明在`read committed`隔离级别下可能出现幻读.
+
+#### `repeatable read`隔离级别下的脏读、不可重复读、幻读
+
+为方便对比，将上面删去的元组重新插入表中，这次设置隔离级别为`repeatable read`：
+
+```mysql
+# T1, T2
+START TRANSACTION ISOLATION LEVEL repeatable read;
+```
+
+之后重复相同的步骤：
+
+```mysql
+# T1
+update partsupp_1
+set PS_AVAILQTY = 1
+where PS_PARTKEY = '2022' and PS_SUPPKEY = '2022';
+```
+
+```mysql
+# T2
+select PS_AVAILQTY
+from partsupp_1
+where PS_PARTKEY = '2022' and PS_SUPPKEY = '2022';
+```
+
+![屏幕截图 2024-12-27 031619](assets/屏幕截图 2024-12-27 031619.png)
+
+仍然不会出现脏读.
+
+```mysql
+# T1
+COMMIT;
+```
+
+```mysql
+# T2
+select PS_AVAILQTY
+from partsupp_1
+where PS_PARTKEY = '2022' and PS_SUPPKEY = '2022';
+```
+
+![屏幕截图 2024-12-27 031704](assets/屏幕截图 2024-12-27 031704.png)
+
+这次没有出现不可重复读.
+
+```mysql
+# T3
+delete from partsupp_1
+where PS_PARTKEY = '2022' and PS_SUPPKEY = '2022';
+```
+
+```mysql
+# T2
+select PS_AVAILQTY
+from partsupp_1
+where PS_PARTKEY = '2022' and PS_SUPPKEY = '2022';
+```
+
+![屏幕截图 2024-12-27 031814](assets/屏幕截图 2024-12-27 031814.png)
+
+也没有出现幻读.
+
+在`repeatable read`隔离级别下，事务内的查询操作看到的是它开始时的表的快照，这样，事务查询到的数据只受到它开始前执行的操作的影响；而在`read committed`隔离级别下，事务查询到的数据受到它开始后执行的操作的影响，如果两次查询之间有其它事务对查询的数据进行了更改，两次查询的结果就会不一致，造成不可重复读和幻读.
